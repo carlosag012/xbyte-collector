@@ -1,0 +1,5 @@
+tar-ignore = node_modules
+tar-ignore = web/node_modules
+tar-ignore = dist
+tar-ignore = web/dist
+tar-ignore = .staging

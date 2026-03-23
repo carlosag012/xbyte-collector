@@ -1,0 +1,13 @@
+#!/bin/sh
+set -e
+
+# Post-removal scaffold for the xbyte-collector appliance package.
+# Keep this minimal; do not delete persistent data/config in this stage.
+
+case "$1" in
+  remove|purge|upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+    systemctl daemon-reload || true
+    ;;
+esac
+
+exit 0

@@ -1,0 +1,14 @@
+Source: xbyte-collector
+Section: misc
+Priority: optional
+Maintainer: xbyte team <devnull@example.com>
+Standards-Version: 4.6.2
+Build-Depends: debhelper-compat (= 13), nodejs
+
+Package: xbyte-collector
+Architecture: amd64
+Depends: ${shlibs:Depends}, ${misc:Depends}, nodejs
+Description: xbyte collector appliance (packaging scaffold)
+ This is an early Debian packaging scaffold for the xbyte collector
+ appliance. It sets up metadata only; final install mapping and
+ maintainer scripts will evolve alongside the Phase 1 appliance build.

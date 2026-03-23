@@ -1,0 +1,37 @@
+#!/bin/sh
+set -e
+
+# Post-install scaffold for the xbyte-collector appliance package.
+# This will be expanded in later packaging tasks.
+
+add_user_group() {
+  if ! id -u xbyte >/dev/null 2>&1; then
+    adduser --system --group --home /var/lib/xbyte-collector xbyte || true
+  fi
+}
+
+ensure_dirs() {
+  mkdir -p /etc/xbyte-collector
+  mkdir -p /var/lib/xbyte-collector
+  mkdir -p /var/log/xbyte-collector
+  chown -R xbyte:xbyte /var/lib/xbyte-collector /var/log/xbyte-collector || true
+}
+
+seed_env_file() {
+  if [ ! -f /etc/xbyte-collector/xbyte-collector.env ] && [ -f /etc/xbyte-collector/xbyte-collector.env.example ]; then
+    cp /etc/xbyte-collector/xbyte-collector.env.example /etc/xbyte-collector/xbyte-collector.env
+    chown xbyte:xbyte /etc/xbyte-collector/xbyte-collector.env || true
+    chmod 640 /etc/xbyte-collector/xbyte-collector.env || true
+  fi
+}
+
+case "$1" in
+  configure)
+    add_user_group
+    ensure_dirs
+    seed_env_file
+    systemctl daemon-reload || true
+    ;;
+esac
+
+exit 0

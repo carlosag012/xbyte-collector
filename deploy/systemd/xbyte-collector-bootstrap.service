@@ -1,0 +1,15 @@
+[Unit]
+Description=xbyte-collector bootstrap (oneshot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=xbyte
+Group=xbyte
+WorkingDirectory=/usr/lib/xbyte-collector
+EnvironmentFile=/etc/xbyte-collector/xbyte-collector.env
+ExecStart=/usr/lib/xbyte-collector/bin/bootstrap.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

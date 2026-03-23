@@ -1,0 +1,5 @@
+xbyte-collector (0.1.0-0) unstable; urgency=low
+
+  * Initial Debian packaging scaffold for the Phase 1 appliance build.
+
+ -- xbyte team <devnull@example.com>  Mon, 23 Mar 2026 12:00:00 +0000

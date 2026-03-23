@@ -1,0 +1,14 @@
+#!/usr/bin/make -f
+
+%:
+	dh $@
+
+# Minimal build wiring for the appliance package scaffold.
+# Builds backend and frontend; no .deb assembly in this step.
+override_dh_auto_build:
+	npm ci
+	cd web && npm ci
+	npm run build
+
+override_dh_auto_clean:
+	rm -rf dist web/dist .staging

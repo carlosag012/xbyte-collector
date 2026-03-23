@@ -1,0 +1,17 @@
+[Unit]
+Description=xbyte-collector backend service
+After=network.target
+
+[Service]
+Type=simple
+User=xbyte
+Group=xbyte
+WorkingDirectory=/usr/lib/xbyte-collector
+EnvironmentFile=/etc/xbyte-collector/xbyte-collector.env
+ExecStart=/usr/bin/node /usr/lib/xbyte-collector/dist/server.js
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

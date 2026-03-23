@@ -1,0 +1,6 @@
+dist/* usr/lib/xbyte-collector/dist
+web/dist/* usr/lib/xbyte-collector/web/dist
+deploy/bin/bootstrap.sh usr/lib/xbyte-collector/bin/
+deploy/xbyte-collector.env.example etc/xbyte-collector/
+deploy/systemd/xbyte-collector.service etc/systemd/system/
+deploy/systemd/xbyte-collector-bootstrap.service etc/systemd/system/
