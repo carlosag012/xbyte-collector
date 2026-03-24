@@ -9,6 +9,9 @@ override_dh_auto_build:
 	npm ci
 	cd web && npm ci
 	npm run build
+	# prune to production runtime deps for packaging
+	npm ci --omit=dev
+	rm -rf web/node_modules
 
 override_dh_auto_clean:
-	rm -rf dist web/dist .staging
+	rm -rf dist web/dist .staging node_modules web/node_modules
