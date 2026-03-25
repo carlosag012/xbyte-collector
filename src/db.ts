@@ -124,6 +124,55 @@ export function initDatabase(config: AppConfig): DB {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS snmp_system_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER NOT NULL,
+      sys_name TEXT,
+      sys_descr TEXT,
+      sys_object_id TEXT,
+      sys_uptime TEXT,
+      collected_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS interface_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER NOT NULL,
+      if_index INTEGER,
+      if_name TEXT,
+      if_descr TEXT,
+      if_alias TEXT,
+      admin_status TEXT,
+      oper_status TEXT,
+      speed INTEGER,
+      mtu INTEGER,
+      mac TEXT,
+      collected_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS lldp_neighbors (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER NOT NULL,
+      local_port TEXT,
+      remote_sys_name TEXT,
+      remote_port_id TEXT,
+      remote_chassis_id TEXT,
+      remote_mgmt_ip TEXT,
+      collected_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS discovered_device_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_device_id INTEGER NOT NULL,
+      remote_sys_name TEXT,
+      remote_chassis_id TEXT,
+      remote_mgmt_ip TEXT,
+      first_seen_at TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'candidate',
+      notes TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS agent_enrollments (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       enrollment_id TEXT NOT NULL UNIQUE,
@@ -899,6 +948,223 @@ export function getWorkerExecutionSummary(
   };
 }
 
+// --- Topology discovery storage helpers ---
+
+export function saveSnmpSystemSnapshot(db: DB, input: {
+  deviceId: number;
+  system: { sysName?: string | null; sysDescr?: string | null; sysObjectId?: string | null; sysUpTime?: string | null };
+  collectedAt: string;
+}) {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO snmp_system_snapshots (device_id, sys_name, sys_descr, sys_object_id, sys_uptime, collected_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    input.deviceId,
+    input.system.sysName ?? null,
+    input.system.sysDescr ?? null,
+    input.system.sysObjectId ?? null,
+    input.system.sysUpTime ?? null,
+    input.collectedAt,
+    now
+  );
+}
+
+export function replaceInterfaceSnapshotsForDevice(
+  db: DB,
+  deviceId: number,
+  interfaces: Array<{
+    ifIndex?: number | null;
+    ifName?: string | null;
+    ifDescr?: string | null;
+    ifAlias?: string | null;
+    adminStatus?: string | null;
+    operStatus?: string | null;
+    speed?: number | null;
+    mtu?: number | null;
+    mac?: string | null;
+  }>,
+  collectedAt: string
+) {
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    db.prepare(`DELETE FROM interface_snapshots WHERE device_id = ?`).run(deviceId);
+    const stmt = db.prepare(
+      `INSERT INTO interface_snapshots (device_id, if_index, if_name, if_descr, if_alias, admin_status, oper_status, speed, mtu, mac, collected_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const intf of interfaces) {
+      stmt.run(
+        deviceId,
+        intf.ifIndex ?? null,
+        intf.ifName ?? null,
+        intf.ifDescr ?? null,
+        intf.ifAlias ?? null,
+        intf.adminStatus ?? null,
+        intf.operStatus ?? null,
+        intf.speed ?? null,
+        intf.mtu ?? null,
+        intf.mac ?? null,
+        collectedAt,
+        now
+      );
+    }
+  });
+  tx();
+}
+
+export function replaceLldpNeighborsForDevice(
+  db: DB,
+  deviceId: number,
+  neighbors: Array<{
+    localPort?: string | null;
+    remoteSysName?: string | null;
+    remotePortId?: string | null;
+    remoteChassisId?: string | null;
+    remoteMgmtIp?: string | null;
+  }>,
+  collectedAt: string
+) {
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    db.prepare(`DELETE FROM lldp_neighbors WHERE device_id = ?`).run(deviceId);
+    const stmt = db.prepare(
+      `INSERT INTO lldp_neighbors (device_id, local_port, remote_sys_name, remote_port_id, remote_chassis_id, remote_mgmt_ip, collected_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const n of neighbors) {
+      stmt.run(
+        deviceId,
+        n.localPort ?? null,
+        n.remoteSysName ?? null,
+        n.remotePortId ?? null,
+        n.remoteChassisId ?? null,
+        n.remoteMgmtIp ?? null,
+        collectedAt,
+        now
+      );
+    }
+  });
+  tx();
+}
+
+export function upsertDiscoveredDeviceCandidatesFromLldp(
+  db: DB,
+  sourceDeviceId: number,
+  neighbors: Array<{
+    remoteSysName?: string | null;
+    remotePortId?: string | null;
+    remoteChassisId?: string | null;
+    remoteMgmtIp?: string | null;
+  }>,
+  collectedAt: string
+) {
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    const selectStmt = db.prepare(
+      `SELECT id, status FROM discovered_device_candidates
+       WHERE source_device_id = ?
+         AND (
+               (remote_chassis_id IS NOT NULL AND remote_chassis_id = ?)
+            OR (remote_chassis_id IS NULL AND remote_mgmt_ip IS NOT NULL AND remote_mgmt_ip = ?)
+            OR (remote_chassis_id IS NULL AND remote_mgmt_ip IS NULL AND remote_sys_name IS NOT NULL AND remote_sys_name = ? AND remote_port_id = ?)
+         )
+       LIMIT 1`
+    );
+    const insertStmt = db.prepare(
+      `INSERT INTO discovered_device_candidates
+         (source_device_id, remote_sys_name, remote_chassis_id, remote_mgmt_ip, first_seen_at, last_seen_at, status, notes, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`
+    );
+    const updateStmt = db.prepare(
+      `UPDATE discovered_device_candidates
+       SET remote_sys_name = ?, remote_chassis_id = ?, remote_mgmt_ip = ?, last_seen_at = ?, updated_at = ?
+       WHERE id = ?`
+    );
+
+    for (const n of neighbors) {
+      const remoteChassisId = n.remoteChassisId ?? null;
+      const remoteMgmtIp = n.remoteMgmtIp ?? null;
+      const remoteSysName = n.remoteSysName ?? null;
+      const remotePortId = n.remotePortId ?? null;
+      const found = selectStmt.get(
+        sourceDeviceId,
+        remoteChassisId,
+        remoteMgmtIp,
+        remoteSysName,
+        remotePortId
+      ) as { id: number; status: string } | undefined;
+      if (found) {
+        updateStmt.run(remoteSysName, remoteChassisId, remoteMgmtIp, collectedAt, now, found.id);
+      } else {
+        insertStmt.run(
+          sourceDeviceId,
+          remoteSysName,
+          remoteChassisId,
+          remoteMgmtIp,
+          collectedAt,
+          collectedAt,
+          "candidate",
+          now,
+          now
+        );
+      }
+    }
+  });
+  tx();
+}
+
+export function getSystemSnapshotsForDevice(db: DB, deviceId: number) {
+  return db
+    .prepare(
+      `SELECT id, device_id as deviceId, sys_name as sysName, sys_descr as sysDescr, sys_object_id as sysObjectId,
+              sys_uptime as sysUpTime, collected_at as collectedAt, created_at as createdAt
+       FROM snmp_system_snapshots
+       WHERE device_id = ?
+       ORDER BY collected_at DESC, id DESC`
+    )
+    .all(deviceId) as any[];
+}
+
+export function listInterfaceSnapshotsForDevice(db: DB, deviceId: number) {
+  return db
+    .prepare(
+      `SELECT id, device_id as deviceId, if_index as ifIndex, if_name as ifName, if_descr as ifDescr, if_alias as ifAlias,
+              admin_status as adminStatus, oper_status as operStatus, speed, mtu, mac,
+              collected_at as collectedAt, created_at as createdAt
+       FROM interface_snapshots
+       WHERE device_id = ?
+       ORDER BY if_index ASC, id ASC`
+    )
+    .all(deviceId) as any[];
+}
+
+export function listLldpNeighborsForDevice(db: DB, deviceId: number) {
+  return db
+    .prepare(
+      `SELECT id, device_id as deviceId, local_port as localPort, remote_sys_name as remoteSysName,
+              remote_port_id as remotePortId, remote_chassis_id as remoteChassisId, remote_mgmt_ip as remoteMgmtIp,
+              collected_at as collectedAt, created_at as createdAt
+       FROM lldp_neighbors
+       WHERE device_id = ?
+       ORDER BY id ASC`
+    )
+    .all(deviceId) as any[];
+}
+
+export function listDiscoveredCandidatesForSourceDevice(db: DB, sourceDeviceId: number) {
+  return db
+    .prepare(
+      `SELECT id, source_device_id as sourceDeviceId, remote_sys_name as remoteSysName, remote_chassis_id as remoteChassisId,
+              remote_mgmt_ip as remoteMgmtIp, first_seen_at as firstSeenAt, last_seen_at as lastSeenAt,
+              status, notes, created_at as createdAt, updated_at as updatedAt
+       FROM discovered_device_candidates
+       WHERE source_device_id = ?
+       ORDER BY last_seen_at DESC, id DESC`
+    )
+    .all(sourceDeviceId) as any[];
+}
+
 export function upsertWorkerRegistration(db: DB, input: {
   workerType: string;
   workerName: string;
@@ -1209,6 +1475,59 @@ export function claimPollJobById(db: DB, input: { jobId: number; leaseOwner: str
      WHERE id = ? AND status = 'pending'`
   ).run(input.leaseOwner, now, now, input.jobId);
   return getPollJobById(db, input.jobId);
+}
+
+export function claimPendingPollJobsBatch(
+  db: DB,
+  input: {
+    workerName: string;
+    supportedKinds: string[];
+    limit: number;
+    shardHint?: number;
+  }
+): PollJobRow[] {
+  if (!input.supportedKinds.length || input.limit <= 0) return [];
+  const now = new Date().toISOString();
+  const kindsPlaceholders = input.supportedKinds.map(() => "?").join(",");
+  const tx = db.transaction(() => {
+    const rows = db
+      .prepare(
+        `SELECT pj.id
+         FROM poll_jobs pj
+         JOIN poll_targets pt ON pj.target_id = pt.id
+         JOIN poll_profiles pp ON pt.profile_id = pp.id
+         WHERE pj.status = 'pending' AND pp.kind IN (${kindsPlaceholders})
+         ORDER BY pj.id
+         LIMIT ?`
+      )
+      .all(...input.supportedKinds, input.limit) as Array<{ id: number }>;
+
+    if (!rows.length) return [] as PollJobRow[];
+
+    const ids = rows.map((r) => r.id);
+    const placeholders = ids.map(() => "?").join(",");
+
+    db.prepare(
+      `UPDATE poll_jobs
+       SET status = 'running', lease_owner = ?, started_at = ?, attempt_count = attempt_count + 1, updated_at = ?
+       WHERE id IN (${placeholders}) AND status = 'pending'`
+    ).run(input.workerName, now, now, ...ids);
+
+    const claimed = db
+      .prepare(
+        `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+                started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+                attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+         FROM poll_jobs
+         WHERE id IN (${placeholders})
+         ORDER BY id`
+      )
+      .all(...ids) as PollJobRowRaw[];
+
+    return claimed.map(mapPollJobRow);
+  });
+
+  return tx();
 }
 
 export function retryPollJob(db: DB, jobId: number): PollJobRow | null {

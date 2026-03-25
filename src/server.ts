@@ -63,6 +63,10 @@ import {
   getPollJobDetail,
   getRunningPollJobDetailForLeaseOwner,
   getRunningPollJobForLeaseOwner,
+  getSystemSnapshotsForDevice,
+  listInterfaceSnapshotsForDevice,
+  listLldpNeighborsForDevice,
+  listDiscoveredCandidatesForSourceDevice,
   getCompany,
   upsertCompany,
   getDeployment,
@@ -722,6 +726,90 @@ const server = createServer((req, res) => {
       });
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true, summary }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url.startsWith("/api/tdt/system-snapshots")) {
+    try {
+      if (!db) throw new Error("db missing");
+      const parsed = new URL(req.url ?? "/api/tdt/system-snapshots", "http://localhost");
+      const deviceIdStr = parsed.searchParams.get("deviceId");
+      const deviceId = Number(deviceIdStr);
+      if (!deviceIdStr || !Number.isFinite(deviceId) || deviceId <= 0 || !Number.isInteger(deviceId)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_tdt_system_snapshots_query" }));
+        return;
+      }
+      const snapshots = getSystemSnapshotsForDevice(db, deviceId);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, snapshots }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url.startsWith("/api/tdt/interfaces")) {
+    try {
+      if (!db) throw new Error("db missing");
+      const parsed = new URL(req.url ?? "/api/tdt/interfaces", "http://localhost");
+      const deviceIdStr = parsed.searchParams.get("deviceId");
+      const deviceId = Number(deviceIdStr);
+      if (!deviceIdStr || !Number.isFinite(deviceId) || deviceId <= 0 || !Number.isInteger(deviceId)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_tdt_interfaces_query" }));
+        return;
+      }
+      const interfaces = listInterfaceSnapshotsForDevice(db, deviceId);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, interfaces }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url.startsWith("/api/tdt/lldp-neighbors")) {
+    try {
+      if (!db) throw new Error("db missing");
+      const parsed = new URL(req.url ?? "/api/tdt/lldp-neighbors", "http://localhost");
+      const deviceIdStr = parsed.searchParams.get("deviceId");
+      const deviceId = Number(deviceIdStr);
+      if (!deviceIdStr || !Number.isFinite(deviceId) || deviceId <= 0 || !Number.isInteger(deviceId)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_tdt_lldp_query" }));
+        return;
+      }
+      const neighbors = listLldpNeighborsForDevice(db, deviceId);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, neighbors }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url.startsWith("/api/tdt/discovered-candidates")) {
+    try {
+      if (!db) throw new Error("db missing");
+      const parsed = new URL(req.url ?? "/api/tdt/discovered-candidates", "http://localhost");
+      const sourceIdStr = parsed.searchParams.get("sourceDeviceId");
+      const sourceDeviceId = Number(sourceIdStr);
+      if (!sourceIdStr || !Number.isFinite(sourceDeviceId) || sourceDeviceId <= 0 || !Number.isInteger(sourceDeviceId)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_tdt_discovered_candidates_query" }));
+        return;
+      }
+      const candidates = listDiscoveredCandidatesForSourceDevice(db, sourceDeviceId);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, candidates }));
     } catch {
       res.writeHead(500);
       res.end(JSON.stringify({ ok: false, error: "db_error" }));
