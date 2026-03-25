@@ -527,8 +527,10 @@ function normalizePrivProtocol(proto: any): string | null {
   if (!proto || typeof proto !== "string") return null;
   let p = proto.replace(/-/g, "").toUpperCase();
   if (p === "AES" || p === "AES128" || p === "AES128C") return "AES";
-  if (p === "AES192" || p === "AES192C") return "AES192";
-  if (p === "AES256" || p === "AES256C") return "AES256";
+  if (p === "AES192") return "AES192";
+  if (p === "AES192C") return "AES192C";
+  if (p === "AES256") return "AES256";
+  if (p === "AES256C") return "AES256C";
   if (p === "DES") return "DES";
   return null;
 }
