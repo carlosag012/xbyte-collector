@@ -355,11 +355,13 @@ function buildSnmpBaseArgs(profileConfig: any, target: string, timeoutSec: numbe
     if (!username) throw new Error("snmpv3_missing_username");
     const securityLevel = profileConfig?.securityLevel || "noAuthNoPriv";
     const args = ["-v", "3", "-l", securityLevel, "-u", username];
-    if (profileConfig?.authProtocol && profileConfig?.authPassword) {
-      args.push("-a", profileConfig.authProtocol, "-A", profileConfig.authPassword);
+    const normAuth = normalizeAuthProtocol(profileConfig?.authProtocol);
+    const normPriv = normalizePrivProtocol(profileConfig?.privProtocol);
+    if (normAuth && profileConfig?.authPassword) {
+      args.push("-a", normAuth, "-A", profileConfig.authPassword);
     }
-    if (profileConfig?.privProtocol && profileConfig?.privPassword) {
-      args.push("-x", profileConfig.privProtocol, "-X", profileConfig.privPassword);
+    if (normPriv && profileConfig?.privPassword) {
+      args.push("-x", normPriv, "-X", profileConfig.privPassword);
     }
     args.push("-On", "-t", timeoutSec.toString(), "-r", "1", target);
     return args;
@@ -506,6 +508,29 @@ function snmpValueToString(raw: string): string {
     val = after ? `${inside} ${after}` : inside;
   }
   return val;
+}
+
+function normalizeAuthProtocol(proto: any): string | null {
+  if (!proto || typeof proto !== "string") return null;
+  let p = proto.replace(/-/g, "").toUpperCase();
+  if (p === "SHA1") p = "SHA";
+  if (p === "SHA") return "SHA";
+  if (p === "MD5") return "MD5";
+  if (p === "SHA224") return "SHA224";
+  if (p === "SHA256") return "SHA256";
+  if (p === "SHA384") return "SHA384";
+  if (p === "SHA512") return "SHA512";
+  return null;
+}
+
+function normalizePrivProtocol(proto: any): string | null {
+  if (!proto || typeof proto !== "string") return null;
+  let p = proto.replace(/-/g, "").toUpperCase();
+  if (p === "AES" || p === "AES128" || p === "AES128C") return "AES";
+  if (p === "AES192" || p === "AES192C") return "AES192";
+  if (p === "AES256" || p === "AES256C") return "AES256";
+  if (p === "DES") return "DES";
+  return null;
 }
 
 async function runWithConcurrency(tasks: Array<() => Promise<void>>, limit: number, shuttingDown: { flag: boolean }) {
