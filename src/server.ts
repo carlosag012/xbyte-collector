@@ -663,6 +663,19 @@ const server = createServer((req, res) => {
     return;
   }
 
+  if (method === "GET" && url === "/api/workers/metrics-summary-by-type") {
+    try {
+      if (!db) throw new Error("db missing");
+      const summary = getWorkerMetricsSummaryByType(db);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, summary }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
   if (method === "GET" && url.startsWith("/api/workers/metrics")) {
     try {
       if (!db) throw new Error("db missing");
@@ -680,19 +693,6 @@ const server = createServer((req, res) => {
       });
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true, snapshot }));
-    } catch {
-      res.writeHead(500);
-      res.end(JSON.stringify({ ok: false, error: "db_error" }));
-    }
-    return;
-  }
-
-  if (method === "GET" && url === "/api/workers/metrics-summary-by-type") {
-    try {
-      if (!db) throw new Error("db missing");
-      const summary = getWorkerMetricsSummaryByType(db);
-      res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, summary }));
     } catch {
       res.writeHead(500);
       res.end(JSON.stringify({ ok: false, error: "db_error" }));
