@@ -7,12 +7,16 @@ import {
   initDatabase,
   upsertWorkerRegistration,
   heartbeatWorkerRegistration,
-  claimNextPendingPollJobForWorkerCapabilities,
+  claimPendingPollJobsBatch,
   finishPollJob,
   abandonPollJob,
   unclaimPollJobById,
   getWorkerRegistrationByName,
-  getRunningPollJobDetailForLeaseOwner,
+  getPollJobDetail,
+  saveSnmpSystemSnapshot,
+  replaceInterfaceSnapshotsForDevice,
+  replaceLldpNeighborsForDevice,
+  upsertDiscoveredDeviceCandidatesFromLldp,
   type DB,
 } from "./db.js";
 
@@ -21,6 +25,10 @@ type WorkerConfig = {
   heartbeatMs: number;
   loopMs: number;
   stubDelayMs: number;
+  batchSize: number;
+  concurrency: number;
+  snmpWalkPath: string;
+  snmpGetPath: string;
 };
 
 function buildWorkerConfig(): WorkerConfig {
@@ -30,6 +38,10 @@ function buildWorkerConfig(): WorkerConfig {
     heartbeatMs: cfg.snmpWorkerHeartbeatMs ?? 15_000,
     loopMs: cfg.snmpWorkerLoopMs ?? 5_000,
     stubDelayMs: cfg.snmpWorkerStubDelayMs ?? 250,
+    batchSize: cfg.snmpWorkerBatchSize ?? 50,
+    concurrency: cfg.snmpWorkerConcurrency ?? 16,
+    snmpWalkPath: cfg.snmpWalkPath ?? "snmpwalk",
+    snmpGetPath: cfg.snmpGetPath ?? "snmpget",
   };
 }
 
@@ -44,33 +56,20 @@ function log(data: Record<string, any>) {
 }
 
 async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: boolean }) {
-  let currentJobId: number | null = null;
+  let currentJobIds = new Set<number>();
   let heartbeatHandle: NodeJS.Timeout | null = null;
 
   async function releaseInFlight(reason: string) {
-    if (currentJobId === null) return;
-    try {
-      const released = unclaimPollJobById(db, { jobId: currentJobId, leaseOwner: workerCfg.workerName });
-      log({
-        level: "info",
-        msg: "released in-flight job on shutdown",
-        jobId: currentJobId,
-        released: Boolean(released),
-        reason,
-        workerName: workerCfg.workerName,
-      });
-    } catch (err: any) {
-      log({
-        level: "error",
-        msg: "failed to release in-flight job on shutdown",
-        jobId: currentJobId,
-        reason,
-        error: err?.message ?? String(err),
-        workerName: workerCfg.workerName,
-      });
-    } finally {
-      currentJobId = null;
+    if (!currentJobIds.size) return;
+    for (const jobId of Array.from(currentJobIds)) {
+      try {
+        const released = unclaimPollJobById(db, { jobId, leaseOwner: workerCfg.workerName });
+        log({ level: "info", msg: "released in-flight job on shutdown", jobId, released: Boolean(released), reason, workerName: workerCfg.workerName });
+      } catch (err: any) {
+        log({ level: "error", msg: "failed to release in-flight job on shutdown", jobId, reason, error: err?.message ?? String(err), workerName: workerCfg.workerName });
+      }
     }
+    currentJobIds.clear();
   }
 
   upsertWorkerRegistration(db, {
@@ -100,129 +99,127 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
         await delay(workerCfg.loopMs);
         continue;
       }
-      const job = claimNextPendingPollJobForWorkerCapabilities(db, {
+      const jobs = claimPendingPollJobsBatch(db, {
         workerName: workerCfg.workerName,
         supportedKinds: ["snmp"],
+        limit: workerCfg.batchSize,
       });
 
-      if (!job) {
+      if (!jobs.length) {
         await delay(workerCfg.loopMs);
         continue;
       }
 
-      currentJobId = job.id;
-      const detail = getRunningPollJobDetailForLeaseOwner(db, workerCfg.workerName);
+      currentJobIds = new Set(jobs.map((j) => j.id));
 
-      if (!detail) {
+      log({ level: "info", msg: "batch claimed", workerName: workerCfg.workerName, count: jobs.length });
+
+      const details = await Promise.all(
+        jobs.map(async (job) => {
+          const detail = getPollJobDetail(db, job.id);
+          return { job, detail };
+        })
+      );
+
+      const validDetails = details.filter((d) => d.detail) as Array<{ job: any; detail: any }>;
+      const invalids = details.filter((d) => !d.detail);
+
+      let successCount = 0;
+      let failCount = invalids.length;
+
+      for (const { job } of invalids) {
         abandonPollJob(db, {
           jobId: job.id,
           leaseOwner: workerCfg.workerName,
+          result: { stub: true, workerType: "snmp", error: "missing_context_after_claim", failedAt: new Date().toISOString() },
+        });
+        currentJobIds.delete(job.id);
+      }
+
+      const tasks = validDetails.map(({ job, detail }) => async () => {
+        log({
+          level: "info",
+          msg: "snmp discovery start",
+          workerName: workerCfg.workerName,
+          jobId: detail.job.id,
+          targetId: detail.target.id,
+          deviceId: detail.device.id,
+          deviceHostname: detail.device.hostname,
+          deviceIpAddress: detail.device.ipAddress,
+        });
+
+        const res = await processSnmpJob(detail, workerCfg);
+        let status: "completed" | "failed" = res.success ? "completed" : "failed";
+        const processedAt = new Date().toISOString();
+
+        if (res.success) {
+          try {
+            persistDiscoveryNormalization(db, detail.device.id, res.discovery, processedAt);
+          } catch (err: any) {
+            status = "failed";
+            res.success = false;
+            res.error = err?.message ?? "snmp_persistence_failed";
+          }
+        }
+
+        finishPollJob(db, {
+          jobId: job.id,
+          status,
           result: {
-            stub: true,
+            stub: false,
             workerType: "snmp",
-            error: "missing_context_after_claim",
-            failedAt: new Date().toISOString(),
+            success: res.success,
+            target: detail.device.ipAddress,
+            processedAt,
+            summary: res.summary,
+            discovery: res.discovery,
+            error: res.error,
+            context: {
+              jobId: detail.job.id,
+              targetId: detail.target.id,
+              deviceId: detail.device.id,
+              deviceHostname: detail.device.hostname,
+              deviceIpAddress: detail.device.ipAddress,
+              profileId: detail.profile.id,
+              profileKind: detail.profile.kind,
+            },
           },
         });
-        currentJobId = null;
-        await delay(workerCfg.loopMs);
-        continue;
-      }
+        currentJobIds.delete(job.id);
+        if (res.success) successCount++;
+        else failCount++;
+
+        log({
+          level: res.success ? "info" : "warn",
+          msg: res.success ? "snmp discovery success" : "snmp discovery failed",
+          workerName: workerCfg.workerName,
+          jobId: detail.job.id,
+          deviceHostname: detail.device.hostname,
+          deviceIpAddress: detail.device.ipAddress,
+          interfacesCount: res.summary.interfacesCount,
+          lldpNeighborsCount: res.summary.lldpNeighborsCount,
+          error: res.error,
+        });
+      });
 
       log({
         level: "info",
-        msg: "claimed job",
-        jobId: job.id,
-        targetId: job.targetId,
-        deviceId: detail.device.id,
-        deviceHostname: detail.device.hostname,
-        profileKind: detail.profile.kind,
+        msg: "snmp batch start",
         workerName: workerCfg.workerName,
+        count: validDetails.length,
+        concurrency: workerCfg.concurrency,
       });
 
-      try {
-        await delay(workerCfg.stubDelayMs);
-        if (shuttingDown.flag) {
-          await releaseInFlight("shutdown_during_processing");
-          break;
-        }
-        const probeTarget = detail.device.ipAddress;
-        const profileConfig = (detail.profile?.config ?? {}) as any;
-        const community = typeof profileConfig.community === "string" && profileConfig.community ? profileConfig.community : "public";
-        const version = typeof profileConfig.version === "string" && profileConfig.version ? profileConfig.version : "2c";
-        const oid = typeof profileConfig.oid === "string" && profileConfig.oid ? profileConfig.oid : "1.3.6.1.2.1.1.3.0";
-        const timeoutMs = typeof detail.profile.timeoutMs === "number" ? detail.profile.timeoutMs : 2000;
+      await runWithConcurrency(tasks, workerCfg.concurrency, shuttingDown);
 
-        log({
-          level: "info",
-          msg: "snmp probe start",
-          jobId: job.id,
-          deviceHostname: detail.device.hostname,
-          deviceIpAddress: probeTarget,
-          oid,
-          workerName: workerCfg.workerName,
-        });
-
-        const { success, value, error } = await runSnmpProbe(probeTarget, oid, community, version, timeoutMs);
-        const status = success ? "completed" : "failed";
-        const resultPayload = {
-          stub: false,
-          workerType: "snmp",
-          success,
-          target: probeTarget,
-          oid,
-          value: success ? value ?? null : undefined,
-          error: success ? undefined : error ?? "snmp_failed",
-          processedAt: new Date().toISOString(),
-          context: {
-            jobId: detail.job.id,
-            targetId: detail.target.id,
-            deviceId: detail.device.id,
-            deviceHostname: detail.device.hostname,
-            deviceIpAddress: detail.device.ipAddress,
-            profileId: detail.profile.id,
-            profileKind: detail.profile.kind,
-          },
-        };
-
-        const finished = finishPollJob(db, {
-          jobId: job.id,
-          status,
-          result: resultPayload,
-        });
-        if (finished && !shuttingDown.flag) {
-          log({
-            level: success ? "info" : "warn",
-            msg: success ? "snmp probe success" : "snmp probe failed",
-            jobId: finished.id,
-            status: finished.status,
-            oid,
-            workerName: workerCfg.workerName,
-            error: success ? undefined : error ?? "snmp_failed",
-          });
-        }
-        currentJobId = null;
-      } catch (err: any) {
-        const abandoned = abandonPollJob(db, {
-          jobId: job.id,
-          leaseOwner: workerCfg.workerName,
-          result: {
-            stub: true,
-            workerType: "snmp",
-            error: err?.message ?? String(err),
-            failedAt: new Date().toISOString(),
-          },
-        });
-        log({
-          level: "error",
-          msg: "job abandon due to error",
-          jobId: job.id,
-          status: abandoned?.status ?? "failed",
-          workerName: workerCfg.workerName,
-          error: err?.message ?? String(err),
-        });
-        currentJobId = null;
-      }
+      log({
+        level: "info",
+        msg: "snmp batch complete",
+        workerName: workerCfg.workerName,
+        claimed: jobs.length,
+        succeeded: successCount,
+        failed: failCount,
+      });
     } catch (err: any) {
       log({ level: "error", msg: "loop exception", error: err?.message ?? String(err), workerName: workerCfg.workerName });
       await delay(workerCfg.loopMs);
@@ -263,22 +260,215 @@ main().catch((err) => {
   process.exit(1);
 });
 
-async function runSnmpProbe(
-  target: string,
-  oid: string,
-  community: string,
-  version: string,
-  timeoutMs: number
-): Promise<{ success: boolean; value?: string | null; error?: string }> {
-  const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
-  const args = ["-v", version, "-c", community, "-t", timeoutSec.toString(), "-r", "1", target, oid];
+async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<{ success: boolean; summary: any; discovery: any; error?: string }> {
+  const target = detail.device.ipAddress;
+  const profileConfig = (detail.profile?.config ?? {}) as any;
+  const timeoutMs = typeof detail.profile.timeoutMs === "number" ? detail.profile.timeoutMs : 2000;
+
   try {
-    const { stdout } = await execFileAsync("snmpget", args, { timeout: timeoutMs + 500, encoding: "utf8" });
-    const line = stdout.trim().split("\n").pop() ?? "";
-    const parts = line.split("=");
-    const value = parts.length > 1 ? parts.slice(1).join("=").trim() : line;
-    return { success: true, value };
+    const system = await snmpGetSystem(workerCfg.snmpGetPath, target, profileConfig, timeoutMs);
+    const interfaces = await snmpWalkInterfaces(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
+    const lldpNeighbors = await snmpWalkLldp(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
+
+    return {
+      success: true,
+      summary: {
+        system,
+        interfacesCount: interfaces.length,
+        lldpNeighborsCount: lldpNeighbors.length,
+      },
+      discovery: {
+        system,
+        interfaces,
+        lldpNeighbors,
+      },
+    };
   } catch (err: any) {
-    return { success: false, error: err?.message ?? "snmp_failed" };
+    return {
+      success: false,
+      summary: { system: null, interfacesCount: 0, lldpNeighborsCount: 0 },
+      discovery: { system: null, interfaces: [], lldpNeighbors: [] },
+      error: err?.message ?? "snmp_failed",
+    };
   }
+}
+
+async function snmpGetSystem(snmpGetPath: string, target: string, profileConfig: any, timeoutMs: number) {
+  const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const oids = ["1.3.6.1.2.1.1.5.0", "1.3.6.1.2.1.1.1.0", "1.3.6.1.2.1.1.2.0", "1.3.6.1.2.1.1.3.0"];
+  const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), ...oids];
+  const { stdout } = await execFileAsync(snmpGetPath, args, { timeout: timeoutMs + 500, encoding: "utf8" });
+  const parsed = parseSnmpGet(stdout);
+  return {
+    sysName: parsed["1.3.6.1.2.1.1.5.0"] ?? null,
+    sysDescr: parsed["1.3.6.1.2.1.1.1.0"] ?? null,
+    sysObjectId: parsed["1.3.6.1.2.1.1.2.0"] ?? null,
+    sysUpTime: parsed["1.3.6.1.2.1.1.3.0"] ?? null,
+  };
+}
+
+async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number) {
+  const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const oids = [
+    "IF-MIB::ifName",
+    "IF-MIB::ifDescr",
+    "IF-MIB::ifAlias",
+    "IF-MIB::ifAdminStatus",
+    "IF-MIB::ifOperStatus",
+    "IF-MIB::ifSpeed",
+    "IF-MIB::ifHighSpeed",
+    "IF-MIB::ifMtu",
+    "IF-MIB::ifPhysAddress",
+  ];
+  const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), ...oids];
+  const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
+  return parseInterfaces(stdout);
+}
+
+async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number) {
+  const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const oids = ["LLDP-MIB::lldpLocPortTable", "LLDP-MIB::lldpRemTable", "LLDP-MIB::lldpRemManAddrTable"];
+  const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), ...oids];
+  const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
+  return parseLldp(stdout);
+}
+
+function buildSnmpBaseArgs(profileConfig: any, target: string, timeoutSec: number): string[] {
+  const version = (profileConfig?.version as string) || "2c";
+  if (version === "3") {
+    const username = profileConfig?.username || profileConfig?.user;
+    if (!username) throw new Error("snmpv3_missing_username");
+    const securityLevel = profileConfig?.securityLevel || "noAuthNoPriv";
+    const args = ["-v", "3", "-l", securityLevel, "-u", username];
+    if (profileConfig?.authProtocol && profileConfig?.authPassword) {
+      args.push("-a", profileConfig.authProtocol, "-A", profileConfig.authPassword);
+    }
+    if (profileConfig?.privProtocol && profileConfig?.privPassword) {
+      args.push("-x", profileConfig.privProtocol, "-X", profileConfig.privPassword);
+    }
+    args.push("-t", timeoutSec.toString(), "-r", "1", target);
+    return args;
+  }
+  const community = profileConfig?.community || "public";
+  const versionClean = version || "2c";
+  return ["-v", versionClean, "-c", community, "-t", timeoutSec.toString(), "-r", "1", target];
+}
+
+function parseSnmpGet(stdout: string): Record<string, string> {
+  const lines = stdout.trim().split("\n");
+  const out: Record<string, string> = {};
+  for (const line of lines) {
+    const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
+    if (!oidPart || !rest) continue;
+    const oidFull = (oidPart.includes("::") ? oidPart.split("::")[1] : oidPart).split(" ")[0];
+    const val = rest.split(":").slice(1).join(":").trim();
+    out[oidFull] = val;
+  }
+  return out;
+}
+
+function parseInterfaces(stdout: string) {
+  const lines = stdout.trim().split("\n").filter((l) => l.trim().length);
+  const map = new Map<number, any>();
+  for (const line of lines) {
+    const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
+    if (!oidPart || !rest) continue;
+    const [oidNameFull, idxStr] = oidPart.split(".");
+    const idx = Number(idxStr);
+    if (!Number.isFinite(idx)) continue;
+    const oidName = oidNameFull.includes("::") ? oidNameFull.split("::")[1] : oidNameFull;
+    const val = rest.split(":").slice(1).join(":").trim();
+    const rec = map.get(idx) ?? {};
+    if (oidName.endsWith("ifName")) rec.ifName = val;
+    else if (oidName.endsWith("ifDescr")) rec.ifDescr = val;
+    else if (oidName.endsWith("ifAlias")) rec.ifAlias = val;
+    else if (oidName.endsWith("ifAdminStatus")) rec.adminStatus = val;
+    else if (oidName.endsWith("ifOperStatus")) rec.operStatus = val;
+    else if (oidName.endsWith("ifSpeed")) rec.ifSpeed = Number(val) || null;
+    else if (oidName.endsWith("ifHighSpeed")) rec.ifHighSpeed = Number(val) || null;
+    else if (oidName.endsWith("ifMtu")) rec.ifMtu = Number(val) || null;
+    else if (oidName.endsWith("ifPhysAddress")) rec.ifPhysAddress = val;
+    map.set(idx, rec);
+  }
+  return Array.from(map.entries()).map(([ifIndex, rec]) => ({
+    ifIndex,
+    ifName: rec.ifName ?? null,
+    ifDescr: rec.ifDescr ?? null,
+    ifAlias: rec.ifAlias ?? null,
+    adminStatus: rec.adminStatus ?? null,
+    operStatus: rec.operStatus ?? null,
+    speed: rec.ifHighSpeed ?? rec.ifSpeed ?? null,
+    mtu: rec.ifMtu ?? null,
+    mac: rec.ifPhysAddress ?? null,
+  }));
+}
+
+function parseLldp(stdout: string) {
+  const neighbors: any[] = [];
+  const lines = stdout.trim().split("\n").filter((l) => l.trim().length);
+  for (const line of lines) {
+    const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
+    if (!oidPart || !rest) continue;
+    if (oidPart.includes("lldpRemSysName")) {
+      const key = oidPart.split(".").slice(-2).join(".");
+      const existing = neighbors.find((n) => n.key === key) ?? { key };
+      existing.remoteSysName = rest.split(":").slice(1).join(":").trim();
+      if (!neighbors.includes(existing)) neighbors.push(existing);
+    } else if (oidPart.includes("lldpRemPortId")) {
+      const key = oidPart.split(".").slice(-2).join(".");
+      const existing = neighbors.find((n) => n.key === key) ?? { key };
+      existing.remotePortId = rest.split(":").slice(1).join(":").trim();
+      if (!neighbors.includes(existing)) neighbors.push(existing);
+    } else if (oidPart.includes("lldpRemChassisId")) {
+      const key = oidPart.split(".").slice(-2).join(".");
+      const existing = neighbors.find((n) => n.key === key) ?? { key };
+      existing.remoteChassisId = rest.split(":").slice(1).join(":").trim();
+      if (!neighbors.includes(existing)) neighbors.push(existing);
+    } else if (oidPart.includes("lldpRemManAddrIfSubtype")) {
+      const key = oidPart.split(".").slice(-2).join(".");
+      const existing = neighbors.find((n) => n.key === key) ?? { key };
+      existing.remoteMgmtIp = rest.split(":").slice(1).join(":").trim();
+      if (!neighbors.includes(existing)) neighbors.push(existing);
+    } else if (oidPart.includes("lldpLocPortId")) {
+      const key = oidPart.split(".").slice(-1).join(".");
+      const existing = neighbors.find((n) => n.localPort === key) ?? { key };
+      existing.localPort = rest.split(":").slice(1).join(":").trim();
+      if (!neighbors.includes(existing)) neighbors.push(existing);
+    }
+  }
+  return neighbors.map((n) => ({
+    localPort: n.localPort ?? null,
+    remoteSysName: n.remoteSysName ?? null,
+    remotePortId: n.remotePortId ?? null,
+    remoteChassisId: n.remoteChassisId ?? null,
+    remoteMgmtIp: n.remoteMgmtIp ?? null,
+  }));
+}
+
+async function runWithConcurrency(tasks: Array<() => Promise<void>>, limit: number, shuttingDown: { flag: boolean }) {
+  let index = 0;
+  const workers = new Array(Math.min(limit, tasks.length)).fill(0).map(async () => {
+    while (!shuttingDown.flag) {
+      const i = index++;
+      if (i >= tasks.length) break;
+      await tasks[i]();
+    }
+  });
+  await Promise.all(workers);
+}
+
+function persistDiscoveryNormalization(
+  db: DB,
+  deviceId: number,
+  discovery: { system: any; interfaces: any[]; lldpNeighbors: any[] },
+  collectedAt: string
+) {
+  saveSnmpSystemSnapshot(db, {
+    deviceId,
+    system: discovery.system ?? {},
+    collectedAt,
+  });
+  replaceInterfaceSnapshotsForDevice(db, deviceId, discovery.interfaces ?? [], collectedAt);
+  replaceLldpNeighborsForDevice(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
+  upsertDiscoveredDeviceCandidatesFromLldp(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
 }
