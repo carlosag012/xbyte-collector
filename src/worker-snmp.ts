@@ -440,10 +440,8 @@ function parseLldp(outputs: Record<string, string>) {
     remoteSysDesc: "1.0.8802.1.1.2.1.4.1.1.10",
     remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
   };
-  const localPortPrefix = "1.0.8802.1.1.2.1.3.7.1.3";
 
   const remMap = new Map<string, any>();
-  const localPorts = new Map<string, string>();
 
   const parseTree = (data: string, key: string, prefix: string, sink: Map<string, any>) => {
     const lines = data.trim().split("\n").filter((l) => l.trim().length);
@@ -454,6 +452,7 @@ function parseLldp(outputs: Record<string, string>) {
       if (!oidFull.startsWith(prefix + ".")) continue;
       const suffix = oidFull.slice(prefix.length + 1);
       let val: string | null = snmpValueToString(rest);
+      let tuple = suffix.split(".").slice(0, 3).join(".");
       if (key === "remoteMgmtIp") {
         const parts = suffix.split(".");
         const addrOctets = parts.slice(-4).map((p) => Number(p));
@@ -463,12 +462,10 @@ function parseLldp(outputs: Record<string, string>) {
           val = null;
         }
       }
-      if (sink === localPorts) {
-        sink.set(suffix, val);
-      } else {
-        const rec = sink.get(suffix) ?? {};
+      const rec = sink.get(tuple) ?? {};
+      if (val !== null) {
         rec[key] = val;
-        sink.set(suffix, rec);
+        sink.set(tuple, rec);
       }
     }
   };
@@ -476,13 +473,12 @@ function parseLldp(outputs: Record<string, string>) {
   for (const [k, p] of Object.entries(keyToPrefixMap)) {
     parseTree(outputs[k] ?? "", k, p, remMap);
   }
-  parseTree(outputs["localPort"] ?? "", "localPort", localPortPrefix, localPorts as any);
 
   const neighbors: any[] = [];
-  for (const [suffix, rec] of remMap.entries()) {
+  for (const [, rec] of remMap.entries()) {
     if (!rec.remoteSysName && !rec.remotePortId && !rec.remoteChassisId && !rec.remoteMgmtIp) continue;
     neighbors.push({
-      localPort: localPorts.get(suffix) ?? null,
+      localPort: null,
       remoteSysName: rec.remoteSysName ?? null,
       remotePortId: rec.remotePortId ?? null,
       remoteChassisId: rec.remoteChassisId ?? null,
