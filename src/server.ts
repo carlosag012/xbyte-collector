@@ -53,6 +53,7 @@ import {
   getPendingPollJobAvailabilityForWorkerCapabilities,
   claimNextPendingPollJobForWorker,
   claimNextPendingPollJobForWorkerCapabilities,
+  claimPendingPollJobsBatch,
   listRunningPollJobsForWorker,
   listStaleRunningPollJobsForWorker,
   claimPollJobById,
@@ -1458,6 +1459,61 @@ const server = createServer((req, res) => {
           }
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true, job }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/poll-jobs/claim-batch-for-worker-capabilities") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        if (
+          !body ||
+          typeof body.workerName !== "string" ||
+          !body.workerName.trim() ||
+          !Number.isFinite(body.limit) ||
+          body.limit <= 0 ||
+          !Array.isArray(body.supportedKinds)
+        ) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_poll_job_claim_batch_payload" }));
+          return;
+        }
+        const limit = Math.min(1000, Math.max(1, Number(body.limit)));
+        const supportedKinds = Array.from(
+          new Set(
+            (body.supportedKinds as any[])
+              .filter((k: any) => typeof k === "string")
+              .map((k: string) => k.trim().toLowerCase())
+          )
+        );
+        if (!supportedKinds.length) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_poll_job_claim_batch_payload" }));
+          return;
+        }
+        try {
+          if (!db) throw new Error("db missing");
+          const worker = getWorkerRegistrationByName(db, body.workerName.trim());
+          if (!worker) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ ok: false, error: "worker_not_found" }));
+            return;
+          }
+          const jobs = claimPendingPollJobsBatch(db, {
+            workerName: worker.workerName,
+            supportedKinds,
+            limit,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, jobs }));
         } catch {
           res.writeHead(500);
           res.end(JSON.stringify({ ok: false, error: "db_error" }));
