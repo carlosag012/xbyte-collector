@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { randomUUID } from "node:crypto";
 import { mkdirSync, existsSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AppConfig } from "./config.js";
@@ -39,7 +40,118 @@ export function initDatabase(config: AppConfig): DB {
       expires_at TEXT NOT NULL,
       FOREIGN KEY(user_id) REFERENCES users(id)
     );
+    CREATE TABLE IF NOT EXISTS devices (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      hostname TEXT NOT NULL,
+      ip_address TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      site TEXT,
+      org TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS poll_profiles (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      kind TEXT NOT NULL,
+      name TEXT NOT NULL,
+      interval_sec INTEGER NOT NULL,
+      timeout_ms INTEGER NOT NULL,
+      retries INTEGER NOT NULL,
+      enabled INTEGER NOT NULL,
+      config_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS poll_targets (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER NOT NULL,
+      profile_id INTEGER NOT NULL,
+      enabled INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(device_id) REFERENCES devices(id),
+      FOREIGN KEY(profile_id) REFERENCES poll_profiles(id)
+    );
+    CREATE TABLE IF NOT EXISTS worker_registrations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      worker_type TEXT NOT NULL,
+      worker_name TEXT NOT NULL UNIQUE,
+      capabilities_json TEXT NOT NULL,
+      last_heartbeat_at TEXT NOT NULL,
+      enabled INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS poll_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      target_id INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      scheduled_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT,
+      lease_owner TEXT,
+      result_json TEXT,
+      attempt_count INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(target_id) REFERENCES poll_targets(id)
+    );
+    CREATE TABLE IF NOT EXISTS companies (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      company_name TEXT NOT NULL,
+      company_slug TEXT NOT NULL UNIQUE,
+      org_id TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS deployments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      deployment_id TEXT NOT NULL UNIQUE,
+      deployment_name TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      registered_to_cloud INTEGER NOT NULL,
+      build_channel TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS cloud_sync_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      enabled INTEGER NOT NULL,
+      status TEXT NOT NULL,
+      last_sync_at TEXT,
+      cloud_endpoint TEXT,
+      tenant_key TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS agent_enrollments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      enrollment_id TEXT NOT NULL UNIQUE,
+      agent_type TEXT NOT NULL,
+      token TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL,
+      company_slug TEXT,
+      deployment_id TEXT,
+      created_at TEXT NOT NULL,
+      expires_at TEXT,
+      last_used_at TEXT,
+      changed_by TEXT,
+      updated_at TEXT NOT NULL
+    );
   `);
+
+  // Additive schema safety for existing databases
+  try {
+    db.prepare(`ALTER TABLE agent_enrollments ADD COLUMN changed_by TEXT`).run();
+  } catch {
+    // ignore if it already exists
+  }
+
+  try {
+    db.prepare(`ALTER TABLE poll_jobs ADD COLUMN result_json TEXT`).run();
+  } catch {
+    // ignore if already exists
+  }
 
   const row = db
     .prepare(`SELECT id FROM bootstrap_state WHERE id = 1`)
@@ -49,6 +161,17 @@ export function initDatabase(config: AppConfig): DB {
     db.prepare(
       `INSERT INTO bootstrap_state (id, configured, status, updated_at) VALUES (1, ?, ?, ?)`
     ).run(0, "not-initialized", new Date().toISOString());
+  }
+
+  const cloudSyncRow = db
+    .prepare(`SELECT id FROM cloud_sync_state WHERE id = 1`)
+    .get() as { id: number } | undefined;
+  if (!cloudSyncRow) {
+    const now = new Date().toISOString();
+    db.prepare(
+      `INSERT INTO cloud_sync_state (id, enabled, status, last_sync_at, cloud_endpoint, tenant_key, created_at, updated_at)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(0, "not-configured", null, null, null, now, now);
   }
 
   return db;
@@ -265,4 +388,1870 @@ export function getSessionById(db: DB, id: string): SessionRow | null {
 
 export function deleteSession(db: DB, id: string) {
   db.prepare(`DELETE FROM sessions WHERE id = ?`).run(id);
+}
+
+export type DeviceRow = {
+  id: number;
+  hostname: string;
+  ipAddress: string;
+  enabled: boolean;
+  site: string | null;
+  org: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function listDevices(db: DB): DeviceRow[] {
+  const rows = db
+    .prepare(
+      `SELECT id, hostname, ip_address as ipAddress, enabled, site, org, created_at as createdAt, updated_at as updatedAt
+       FROM devices ORDER BY id`
+    )
+    .all() as Array<{
+    id: number;
+    hostname: string;
+    ipAddress: string;
+    enabled: number;
+    site: string | null;
+    org: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  return rows.map((r) => ({ ...r, enabled: Boolean(r.enabled) }));
+}
+
+export function createDevice(db: DB, input: { hostname: string; ipAddress: string; enabled?: boolean; site?: string; org?: string }): DeviceRow {
+  const now = new Date().toISOString();
+  const enabled = input.enabled ?? true;
+  const result = db
+    .prepare(
+      `INSERT INTO devices (hostname, ip_address, enabled, site, org, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(input.hostname, input.ipAddress, enabled ? 1 : 0, input.site ?? null, input.org ?? null, now, now);
+  return {
+    id: Number(result.lastInsertRowid),
+    hostname: input.hostname,
+    ipAddress: input.ipAddress,
+    enabled,
+    site: input.site ?? null,
+    org: input.org ?? null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function getDeviceById(db: DB, id: number): DeviceRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, hostname, ip_address as ipAddress, enabled, site, org, created_at as createdAt, updated_at as updatedAt
+       FROM devices WHERE id = ? LIMIT 1`
+    )
+    .get(id) as
+    | {
+        id: number;
+        hostname: string;
+        ipAddress: string;
+        enabled: number;
+        site: string | null;
+        org: string | null;
+        createdAt: string;
+        updatedAt: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return { ...row, enabled: Boolean(row.enabled) };
+}
+
+export type PollProfileRow = {
+  id: number;
+  kind: string;
+  name: string;
+  intervalSec: number;
+  timeoutMs: number;
+  retries: number;
+  enabled: boolean;
+  config: any;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function listPollProfiles(db: DB): PollProfileRow[] {
+  const rows = db
+    .prepare(
+      `SELECT id, kind, name, interval_sec as intervalSec, timeout_ms as timeoutMs, retries, enabled,
+              config_json as configJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_profiles ORDER BY id`
+    )
+    .all() as Array<{
+    id: number;
+    kind: string;
+    name: string;
+    intervalSec: number;
+    timeoutMs: number;
+    retries: number;
+    enabled: number;
+    configJson: string;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  return rows.map((r) => ({
+    ...r,
+    enabled: Boolean(r.enabled),
+    config: safeParseJson(r.configJson),
+  }));
+}
+
+export function createPollProfile(db: DB, input: {
+  kind: string;
+  name: string;
+  intervalSec: number;
+  timeoutMs: number;
+  retries: number;
+  enabled?: boolean;
+  config?: any;
+}): PollProfileRow {
+  const now = new Date().toISOString();
+  const enabled = input.enabled ?? true;
+  const configJson = JSON.stringify(input.config ?? {});
+  const result = db
+    .prepare(
+      `INSERT INTO poll_profiles (kind, name, interval_sec, timeout_ms, retries, enabled, config_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(input.kind, input.name, input.intervalSec, input.timeoutMs, input.retries, enabled ? 1 : 0, configJson, now, now);
+  return {
+    id: Number(result.lastInsertRowid),
+    kind: input.kind,
+    name: input.name,
+    intervalSec: input.intervalSec,
+    timeoutMs: input.timeoutMs,
+    retries: input.retries,
+    enabled,
+    config: input.config ?? {},
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function getPollProfileById(db: DB, id: number): PollProfileRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, kind, name, interval_sec as intervalSec, timeout_ms as timeoutMs, retries, enabled,
+              config_json as configJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_profiles WHERE id = ? LIMIT 1`
+    )
+    .get(id) as
+    | {
+        id: number;
+        kind: string;
+        name: string;
+        intervalSec: number;
+        timeoutMs: number;
+        retries: number;
+        enabled: number;
+        configJson: string;
+        createdAt: string;
+        updatedAt: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    ...row,
+    enabled: Boolean(row.enabled),
+    config: safeParseJson(row.configJson),
+  };
+}
+
+export type WorkerRegistrationRow = {
+  id: number;
+  workerType: string;
+  workerName: string;
+  capabilities: any;
+  lastHeartbeatAt: string;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function listWorkerRegistrations(db: DB): WorkerRegistrationRow[] {
+  const rows = db
+    .prepare(
+      `SELECT id, worker_type as workerType, worker_name as workerName, capabilities_json as capabilitiesJson,
+              last_heartbeat_at as lastHeartbeatAt, enabled, created_at as createdAt, updated_at as updatedAt
+       FROM worker_registrations ORDER BY id`
+    )
+    .all() as Array<{
+    id: number;
+    workerType: string;
+    workerName: string;
+    capabilitiesJson: string;
+    lastHeartbeatAt: string;
+    enabled: number;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  return rows.map((r) => ({
+    ...r,
+    enabled: Boolean(r.enabled),
+    capabilities: safeParseJson(r.capabilitiesJson),
+  }));
+}
+
+export function getWorkerRegistrationByName(db: DB, workerName: string): WorkerRegistrationRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, worker_type as workerType, worker_name as workerName, capabilities_json as capabilitiesJson,
+              last_heartbeat_at as lastHeartbeatAt, enabled, created_at as createdAt, updated_at as updatedAt
+       FROM worker_registrations
+       WHERE worker_name = ?
+       LIMIT 1`
+    )
+    .get(workerName) as
+    | {
+        id: number;
+        workerType: string;
+        workerName: string;
+        capabilitiesJson: string;
+        lastHeartbeatAt: string;
+        enabled: number;
+        createdAt: string;
+        updatedAt: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    ...row,
+    enabled: Boolean(row.enabled),
+    capabilities: safeParseJson(row.capabilitiesJson),
+  };
+}
+
+export function updateWorkerRegistrationEnabled(db: DB, workerName: string, enabled: boolean): WorkerRegistrationRow | null {
+  const existing = getWorkerRegistrationByName(db, workerName);
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  db.prepare(`UPDATE worker_registrations SET enabled = ?, updated_at = ? WHERE worker_name = ?`).run(
+    enabled ? 1 : 0,
+    now,
+    workerName
+  );
+  return { ...existing, enabled, updatedAt: now };
+}
+
+export function getWorkerMetricsSnapshot(
+  db: DB,
+  input?: { workerName?: string; workerType?: "ping" | "snmp" }
+): {
+  workers: Array<{
+    workerName: string;
+    workerType: string;
+    enabled: boolean;
+    lastHeartbeatAt: string;
+    runningJobs: number;
+    completedJobs: number;
+    failedJobs: number;
+  }>;
+  totals: {
+    workers: number;
+    runningJobs: number;
+    completedJobs: number;
+    failedJobs: number;
+  };
+  filters: {
+    workerName?: string;
+    workerType?: "ping" | "snmp";
+  };
+} {
+  const nameFilter = input?.workerName;
+  const typeFilter = input?.workerType;
+
+  const workers = listWorkerRegistrations(db).filter((w) => {
+    if (nameFilter && w.workerName !== nameFilter) return false;
+    if (typeFilter && w.workerType !== typeFilter) return false;
+    return true;
+  });
+
+  const countsFor = (workerName: string, status: "running" | "completed" | "failed") => {
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) as count
+         FROM poll_jobs
+         WHERE status = ? AND lease_owner = ?`
+      )
+      .get(status, workerName) as { count: number };
+    return row?.count ?? 0;
+  };
+
+  const workersWithCounts = workers.map((w) => {
+    const running = countsFor(w.workerName, "running");
+    const completed = countsFor(w.workerName, "completed");
+    const failed = countsFor(w.workerName, "failed");
+    return {
+      workerName: w.workerName,
+      workerType: w.workerType,
+      enabled: w.enabled,
+      lastHeartbeatAt: w.lastHeartbeatAt,
+      runningJobs: running,
+      completedJobs: completed,
+      failedJobs: failed,
+    };
+  });
+
+  const totals = workersWithCounts.reduce(
+    (acc, w) => {
+      acc.workers += 1;
+      acc.runningJobs += w.runningJobs;
+      acc.completedJobs += w.completedJobs;
+      acc.failedJobs += w.failedJobs;
+      return acc;
+    },
+    { workers: 0, runningJobs: 0, completedJobs: 0, failedJobs: 0 }
+  );
+
+  return {
+    workers: workersWithCounts,
+    totals,
+    filters: {
+      ...(nameFilter ? { workerName: nameFilter } : {}),
+      ...(typeFilter ? { workerType: typeFilter } : {}),
+    },
+  };
+}
+
+export function getWorkerMetricsSummaryByType(
+  db: DB
+): {
+  types: Array<{
+    workerType: "ping" | "snmp";
+    workers: number;
+    enabledWorkers: number;
+    disabledWorkers: number;
+    runningJobs: number;
+    completedJobs: number;
+    failedJobs: number;
+  }>;
+  totals: {
+    workers: number;
+    enabledWorkers: number;
+    disabledWorkers: number;
+    runningJobs: number;
+    completedJobs: number;
+    failedJobs: number;
+  };
+} {
+  const types: Array<"ping" | "snmp"> = ["ping", "snmp"];
+  const allWorkers = listWorkerRegistrations(db).filter((w) => types.includes(w.workerType as "ping" | "snmp"));
+
+  const countJobs = (names: string[], status: "running" | "completed" | "failed") => {
+    if (!names.length) return 0;
+    const placeholders = names.map(() => "?").join(",");
+    const row = db
+      .prepare(
+        `SELECT COUNT(*) as count
+         FROM poll_jobs
+         WHERE status = ? AND lease_owner IN (${placeholders})`
+      )
+      .get(status, ...names) as { count: number };
+    return row?.count ?? 0;
+  };
+
+  const summaries = types.map((t) => {
+    const workersOfType = allWorkers.filter((w) => w.workerType === t);
+    const names = workersOfType.map((w) => w.workerName);
+    return {
+      workerType: t,
+      workers: workersOfType.length,
+      enabledWorkers: workersOfType.filter((w) => w.enabled).length,
+      disabledWorkers: workersOfType.filter((w) => !w.enabled).length,
+      runningJobs: countJobs(names, "running"),
+      completedJobs: countJobs(names, "completed"),
+      failedJobs: countJobs(names, "failed"),
+    };
+  });
+
+  const totals = summaries.reduce(
+    (acc, s) => {
+      acc.workers += s.workers;
+      acc.enabledWorkers += s.enabledWorkers;
+      acc.disabledWorkers += s.disabledWorkers;
+      acc.runningJobs += s.runningJobs;
+      acc.completedJobs += s.completedJobs;
+      acc.failedJobs += s.failedJobs;
+      return acc;
+    },
+    { workers: 0, enabledWorkers: 0, disabledWorkers: 0, runningJobs: 0, completedJobs: 0, failedJobs: 0 }
+  );
+
+  return { types: summaries, totals };
+}
+
+export function getWorkerExecutionSummary(
+  db: DB,
+  input?: { workerType?: "ping" | "snmp"; sinceSeconds?: number }
+): {
+  types: Array<{
+    workerType: "ping" | "snmp";
+    totalFinishedJobs: number;
+    successfulJobs: number;
+    failedJobs: number;
+    avgLatencyMs: number | null;
+    lastProcessedAt: string | null;
+  }>;
+  totals: {
+    totalFinishedJobs: number;
+    successfulJobs: number;
+    failedJobs: number;
+  };
+  filters: {
+    workerType?: "ping" | "snmp";
+    sinceSeconds?: number;
+  };
+} {
+  const types: Array<"ping" | "snmp"> = input?.workerType ? [input.workerType] : ["ping", "snmp"];
+  const sinceThreshold =
+    input?.sinceSeconds && input.sinceSeconds > 0 ? new Date(Date.now() - input.sinceSeconds * 1000).toISOString() : null;
+
+  const rows = db
+    .prepare(
+      `SELECT status, result_json as resultJson, updated_at as updatedAt
+       FROM poll_jobs
+       WHERE status IN ('completed', 'failed') ${sinceThreshold ? "AND updated_at >= ?" : ""}`
+    )
+    .all(...(sinceThreshold ? [sinceThreshold] : [])) as Array<{ status: string; resultJson: string | null; updatedAt: string }>;
+
+  const summaryByType = new Map<
+    "ping" | "snmp",
+    {
+      totalFinishedJobs: number;
+      successfulJobs: number;
+      failedJobs: number;
+      latencies: number[];
+      lastProcessedAt: string | null;
+    }
+  >();
+
+  types.forEach((t) => {
+    summaryByType.set(t, {
+      totalFinishedJobs: 0,
+      successfulJobs: 0,
+      failedJobs: 0,
+      latencies: [],
+      lastProcessedAt: null,
+    });
+  });
+
+  rows.forEach((r) => {
+    const parsed = safeParseJson(r.resultJson ?? "{}");
+    const workerType = parsed?.workerType;
+    if (workerType !== "ping" && workerType !== "snmp") return;
+    if (!summaryByType.has(workerType)) return;
+
+    const bucket = summaryByType.get(workerType)!;
+    bucket.totalFinishedJobs += 1;
+    const successFlag = parsed?.success === true || r.status === "completed";
+    const failureFlag = parsed?.success === false || r.status === "failed";
+    if (successFlag) bucket.successfulJobs += 1;
+    if (failureFlag) bucket.failedJobs += 1;
+
+    if (Number.isFinite(parsed?.latencyMs)) {
+      bucket.latencies.push(Number(parsed.latencyMs));
+    }
+
+    const processedAt = parsed?.processedAt ?? r.updatedAt;
+    if (processedAt && (!bucket.lastProcessedAt || processedAt > bucket.lastProcessedAt)) {
+      bucket.lastProcessedAt = processedAt;
+    }
+  });
+
+  const typesArray = types.map((t) => {
+    const b = summaryByType.get(t)!;
+    const avgLatencyMs = b.latencies.length
+      ? b.latencies.reduce((a, v) => a + v, 0) / b.latencies.length
+      : null;
+    return {
+      workerType: t,
+      totalFinishedJobs: b.totalFinishedJobs,
+      successfulJobs: b.successfulJobs,
+      failedJobs: b.failedJobs,
+      avgLatencyMs: avgLatencyMs !== null ? Number(avgLatencyMs.toFixed(2)) : null,
+      lastProcessedAt: b.lastProcessedAt,
+    };
+  });
+
+  const totals = typesArray.reduce(
+    (acc, t) => {
+      acc.totalFinishedJobs += t.totalFinishedJobs;
+      acc.successfulJobs += t.successfulJobs;
+      acc.failedJobs += t.failedJobs;
+      return acc;
+    },
+    { totalFinishedJobs: 0, successfulJobs: 0, failedJobs: 0 }
+  );
+
+  return {
+    types: typesArray,
+    totals,
+    filters: {
+      ...(input?.workerType ? { workerType: input.workerType } : {}),
+      ...(input?.sinceSeconds ? { sinceSeconds: input.sinceSeconds } : {}),
+    },
+  };
+}
+
+export function upsertWorkerRegistration(db: DB, input: {
+  workerType: string;
+  workerName: string;
+  capabilities?: any;
+  enabled?: boolean;
+}): WorkerRegistrationRow {
+  const now = new Date().toISOString();
+  const enabled = input.enabled ?? true;
+  const capabilitiesJson = JSON.stringify(input.capabilities ?? {});
+  const existing = db
+    .prepare(
+      `SELECT id FROM worker_registrations WHERE worker_name = ? LIMIT 1`
+    )
+    .get(input.workerName) as { id: number } | undefined;
+
+  if (existing) {
+    db.prepare(
+      `UPDATE worker_registrations
+       SET worker_type = ?, capabilities_json = ?, last_heartbeat_at = ?, enabled = ?, updated_at = ?
+       WHERE worker_name = ?`
+    ).run(input.workerType, capabilitiesJson, now, enabled ? 1 : 0, now, input.workerName);
+    const row = db
+      .prepare(
+        `SELECT id, worker_type as workerType, worker_name as workerName, capabilities_json as capabilitiesJson,
+                last_heartbeat_at as lastHeartbeatAt, enabled, created_at as createdAt, updated_at as updatedAt
+         FROM worker_registrations WHERE worker_name = ? LIMIT 1`
+      )
+      .get(input.workerName) as any;
+    return {
+      id: row.id,
+      workerType: row.workerType,
+      workerName: row.workerName,
+      capabilities: safeParseJson(row.capabilitiesJson),
+      lastHeartbeatAt: row.lastHeartbeatAt,
+      enabled: Boolean(row.enabled),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+    };
+  }
+
+  const result = db
+    .prepare(
+      `INSERT INTO worker_registrations (worker_type, worker_name, capabilities_json, last_heartbeat_at, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(input.workerType, input.workerName, capabilitiesJson, now, enabled ? 1 : 0, now, now);
+
+  return {
+    id: Number(result.lastInsertRowid),
+    workerType: input.workerType,
+    workerName: input.workerName,
+    capabilities: input.capabilities ?? {},
+    lastHeartbeatAt: now,
+    enabled,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function heartbeatWorkerRegistration(db: DB, workerName: string): WorkerRegistrationRow | null {
+  const existing = db
+    .prepare(
+      `SELECT id, worker_type as workerType, worker_name as workerName, capabilities_json as capabilitiesJson,
+              last_heartbeat_at as lastHeartbeatAt, enabled, created_at as createdAt, updated_at as updatedAt
+       FROM worker_registrations WHERE worker_name = ? LIMIT 1`
+    )
+    .get(workerName) as any;
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE worker_registrations SET last_heartbeat_at = ?, updated_at = ? WHERE worker_name = ?`
+  ).run(now, now, workerName);
+  return {
+    id: existing.id,
+    workerType: existing.workerType,
+    workerName: existing.workerName,
+    capabilities: safeParseJson(existing.capabilitiesJson),
+    lastHeartbeatAt: now,
+    enabled: Boolean(existing.enabled),
+    createdAt: existing.createdAt,
+    updatedAt: now,
+  };
+}
+
+function safeParseJson(str: any): any {
+  try {
+    return JSON.parse(str ?? "{}");
+  } catch {
+    return {};
+  }
+}
+
+export type PollTargetRow = {
+  id: number;
+  deviceId: number;
+  profileId: number;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function listPollTargets(db: DB): PollTargetRow[] {
+  const rows = db
+    .prepare(
+      `SELECT id, device_id as deviceId, profile_id as profileId, enabled,
+              created_at as createdAt, updated_at as updatedAt
+       FROM poll_targets ORDER BY id`
+    )
+    .all() as Array<{
+    id: number;
+    deviceId: number;
+    profileId: number;
+    enabled: number;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  return rows.map((r) => ({ ...r, enabled: Boolean(r.enabled) }));
+}
+
+export function listEnabledPollTargets(db: DB): PollTargetRow[] {
+  const rows = db
+    .prepare(
+      `SELECT id, device_id as deviceId, profile_id as profileId, enabled,
+              created_at as createdAt, updated_at as updatedAt
+       FROM poll_targets WHERE enabled = 1 ORDER BY id`
+    )
+    .all() as Array<{
+    id: number;
+    deviceId: number;
+    profileId: number;
+    enabled: number;
+    createdAt: string;
+    updatedAt: string;
+  }>;
+  return rows.map((r) => ({ ...r, enabled: Boolean(r.enabled) }));
+}
+
+export function getPollTargetById(db: DB, id: number): PollTargetRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, device_id as deviceId, profile_id as profileId, enabled,
+              created_at as createdAt, updated_at as updatedAt
+       FROM poll_targets WHERE id = ? LIMIT 1`
+    )
+    .get(id) as
+    | {
+        id: number;
+        deviceId: number;
+        profileId: number;
+        enabled: number;
+        createdAt: string;
+        updatedAt: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return { ...row, enabled: Boolean(row.enabled) };
+}
+
+export function createPollTarget(db: DB, input: { deviceId: number; profileId: number; enabled?: boolean }): PollTargetRow {
+  const now = new Date().toISOString();
+  const enabled = input.enabled ?? true;
+  const result = db
+    .prepare(
+      `INSERT INTO poll_targets (device_id, profile_id, enabled, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .run(input.deviceId, input.profileId, enabled ? 1 : 0, now, now);
+  return {
+    id: Number(result.lastInsertRowid),
+    deviceId: input.deviceId,
+    profileId: input.profileId,
+    enabled,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export type PollJobRow = {
+  id: number;
+  targetId: number;
+  status: string;
+  scheduledAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  leaseOwner: string | null;
+  attemptCount: number;
+  result: any | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type PollJobRowRaw = {
+  id: number;
+  targetId: number;
+  status: string;
+  scheduledAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  leaseOwner: string | null;
+  attemptCount: number;
+  resultJson: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+function mapPollJobRow(row: PollJobRowRaw): PollJobRow {
+  return {
+    id: row.id,
+    targetId: row.targetId,
+    status: row.status,
+    scheduledAt: row.scheduledAt,
+    startedAt: row.startedAt,
+    finishedAt: row.finishedAt,
+    leaseOwner: row.leaseOwner ?? null,
+    attemptCount: row.attemptCount,
+    result: safeParseJson(row.resultJson ?? null),
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+export function listPollJobs(db: DB, status?: "pending" | "running" | "completed" | "failed", leaseOwner?: string | null): PollJobRow[] {
+  const clauses: string[] = [];
+  const params: any[] = [];
+
+  if (status) {
+    clauses.push("status = ?");
+    params.push(status);
+  }
+
+  if (leaseOwner !== undefined) {
+    clauses.push("lease_owner = ?");
+    params.push(leaseOwner);
+  }
+
+  const where = clauses.length ? ` WHERE ${clauses.join(" AND ")}` : "";
+  const rows = db
+    .prepare(
+      `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+              started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+              attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_jobs${where} ORDER BY id`
+    )
+    .all(...params) as PollJobRowRaw[];
+  return rows.map(mapPollJobRow);
+}
+
+export function getPollJobById(db: DB, id: number): PollJobRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+              started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+              attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_jobs WHERE id = ? LIMIT 1`
+    )
+    .get(id) as PollJobRowRaw | undefined;
+  if (!row) return null;
+  return mapPollJobRow(row);
+}
+
+export function claimNextPendingPollJob(db: DB, leaseOwner: string): PollJobRow | null {
+  const now = new Date().toISOString();
+
+  const tx = db.transaction(() => {
+    const row = db
+      .prepare(
+        `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+                started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+                attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+         FROM poll_jobs
+         WHERE status = 'pending'
+         ORDER BY id
+         LIMIT 1`
+      )
+      .get() as any;
+
+    if (!row) return null;
+
+    db.prepare(
+      `UPDATE poll_jobs
+       SET status = ?, lease_owner = ?, started_at = ?, attempt_count = attempt_count + 1, updated_at = ?
+       WHERE id = ? AND status = 'pending'`
+    ).run("running", leaseOwner, now, now, row.id);
+
+    const claimed = db
+      .prepare(
+        `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+                started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+                attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+         FROM poll_jobs
+         WHERE id = ? LIMIT 1`
+      )
+      .get(row.id) as any;
+
+    return claimed ? { ...claimed, result: safeParseJson(claimed.resultJson ?? null), leaseOwner: claimed.leaseOwner ?? null } as PollJobRow : null;
+  });
+
+  return tx();
+}
+
+export function claimPollJobById(db: DB, input: { jobId: number; leaseOwner: string }): PollJobRow | null {
+  const existing = getPollJobById(db, input.jobId);
+  if (!existing || existing.status !== "pending") return null;
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE poll_jobs
+     SET status = 'running', lease_owner = ?, started_at = ?, attempt_count = attempt_count + 1, updated_at = ?
+     WHERE id = ? AND status = 'pending'`
+  ).run(input.leaseOwner, now, now, input.jobId);
+  return getPollJobById(db, input.jobId);
+}
+
+export function retryPollJob(db: DB, jobId: number): PollJobRow | null {
+  const existing = getPollJobById(db, jobId);
+  if (!existing || existing.status !== "failed") return null;
+  return createPollJob(db, { targetId: existing.targetId });
+}
+
+export function finishPollJob(db: DB, input: { jobId: number; status: "completed" | "failed"; result?: any | null }): PollJobRow | null {
+  const existing = getPollJobById(db, input.jobId);
+  if (!existing || existing.status !== "running") return null;
+  const now = new Date().toISOString();
+  const resultJson = JSON.stringify(input.result ?? null);
+  db.prepare(
+    `UPDATE poll_jobs
+     SET status = ?, finished_at = ?, result_json = ?, updated_at = ?
+     WHERE id = ? AND status = 'running'`
+  ).run(input.status, now, resultJson, now, input.jobId);
+  return getPollJobById(db, input.jobId);
+}
+
+export function releasePollJob(db: DB, jobId: number): PollJobRow | null {
+  const existing = getPollJobById(db, jobId);
+  if (!existing || existing.status !== "running") return null;
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE poll_jobs
+     SET status = 'pending', lease_owner = NULL, started_at = NULL, finished_at = NULL, result_json = NULL, updated_at = ?
+     WHERE id = ? AND status = 'running'`
+  ).run(now, jobId);
+  return getPollJobById(db, jobId);
+}
+
+export function heartbeatPollJob(db: DB, input: { jobId: number; leaseOwner: string }): PollJobRow | null {
+  const existing = getPollJobById(db, input.jobId);
+  if (!existing || existing.status !== "running") return null;
+  if ((existing.leaseOwner ?? null) !== input.leaseOwner) return null;
+  const now = new Date().toISOString();
+  db.prepare(`UPDATE poll_jobs SET updated_at = ? WHERE id = ?`).run(now, input.jobId);
+  return getPollJobById(db, input.jobId);
+}
+
+export function abandonPollJob(db: DB, input: { jobId: number; leaseOwner: string; result?: any | null }): PollJobRow | null {
+  const existing = getPollJobById(db, input.jobId);
+  if (!existing || existing.status !== "running") return null;
+  if ((existing.leaseOwner ?? null) !== input.leaseOwner) return null;
+  const now = new Date().toISOString();
+  const resultJson = JSON.stringify(input.result ?? null);
+  db.prepare(
+    `UPDATE poll_jobs
+     SET status = 'failed', finished_at = ?, result_json = ?, updated_at = ?
+     WHERE id = ? AND status = 'running'`
+  ).run(now, resultJson, now, input.jobId);
+  return getPollJobById(db, input.jobId);
+}
+
+export function unclaimPollJobById(db: DB, input: { jobId: number; leaseOwner: string }): PollJobRow | null {
+  const existing = getPollJobById(db, input.jobId);
+  if (!existing || existing.status !== "running") return null;
+  if ((existing.leaseOwner ?? null) !== input.leaseOwner) return null;
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE poll_jobs
+     SET status = 'pending', lease_owner = NULL, started_at = NULL, finished_at = NULL, result_json = NULL, updated_at = ?
+     WHERE id = ? AND status = 'running'`
+  ).run(now, input.jobId);
+  return getPollJobById(db, input.jobId);
+}
+
+export function getRunningPollJobForLeaseOwner(db: DB, leaseOwner: string): PollJobRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+              started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+              attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_jobs
+       WHERE status = 'running' AND lease_owner = ?
+       ORDER BY id ASC
+       LIMIT 1`
+    )
+    .get(leaseOwner) as PollJobRowRaw | undefined;
+  return row ? mapPollJobRow(row) : null;
+}
+
+export function getPollJobDetail(
+  db: DB,
+  jobId: number
+): {
+  job: PollJobRow;
+  target: PollTargetRow;
+  device: DeviceRow;
+  profile: PollProfileRow;
+} | null {
+  const row = db
+    .prepare(
+      `SELECT
+         pj.id as jobId, pj.target_id as jobTargetId, pj.status as jobStatus, pj.scheduled_at as jobScheduledAt,
+         pj.started_at as jobStartedAt, pj.finished_at as jobFinishedAt, pj.lease_owner as jobLeaseOwner,
+         pj.result_json as jobResultJson, pj.attempt_count as jobAttemptCount, pj.created_at as jobCreatedAt, pj.updated_at as jobUpdatedAt,
+         pt.id as targetId, pt.device_id as targetDeviceId, pt.profile_id as targetProfileId, pt.enabled as targetEnabled,
+         pt.created_at as targetCreatedAt, pt.updated_at as targetUpdatedAt,
+         d.id as deviceId, d.hostname as deviceHostname, d.ip_address as deviceIpAddress, d.enabled as deviceEnabled,
+         d.site as deviceSite, d.org as deviceOrg, d.created_at as deviceCreatedAt, d.updated_at as deviceUpdatedAt,
+         pp.id as profileId, pp.kind as profileKind, pp.name as profileName, pp.interval_sec as profileIntervalSec,
+         pp.timeout_ms as profileTimeoutMs, pp.retries as profileRetries, pp.enabled as profileEnabled,
+         pp.config_json as profileConfigJson, pp.created_at as profileCreatedAt, pp.updated_at as profileUpdatedAt
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pj.target_id = pt.id
+       JOIN devices d ON pt.device_id = d.id
+       JOIN poll_profiles pp ON pt.profile_id = pp.id
+       WHERE pj.id = ?
+       LIMIT 1`
+    )
+    .get(jobId) as
+    | {
+        jobId: number;
+        jobTargetId: number;
+        jobStatus: string;
+        jobScheduledAt: string | null;
+        jobStartedAt: string | null;
+        jobFinishedAt: string | null;
+        jobLeaseOwner: string | null;
+        jobResultJson: string | null;
+        jobAttemptCount: number;
+        jobCreatedAt: string;
+        jobUpdatedAt: string;
+        targetId: number;
+        targetDeviceId: number;
+        targetProfileId: number;
+        targetEnabled: number;
+        targetCreatedAt: string;
+        targetUpdatedAt: string;
+        deviceId: number;
+        deviceHostname: string;
+        deviceIpAddress: string;
+        deviceEnabled: number;
+        deviceSite: string | null;
+        deviceOrg: string | null;
+        deviceCreatedAt: string;
+        deviceUpdatedAt: string;
+        profileId: number;
+        profileKind: string;
+        profileName: string;
+        profileIntervalSec: number;
+        profileTimeoutMs: number;
+        profileRetries: number;
+        profileEnabled: number;
+        profileConfigJson: string;
+        profileCreatedAt: string;
+        profileUpdatedAt: string;
+      }
+    | undefined;
+
+  if (!row) return null;
+
+  const job: PollJobRow = mapPollJobRow({
+    id: row.jobId,
+    targetId: row.jobTargetId,
+    status: row.jobStatus,
+    scheduledAt: row.jobScheduledAt,
+    startedAt: row.jobStartedAt,
+    finishedAt: row.jobFinishedAt,
+    leaseOwner: row.jobLeaseOwner ?? null,
+    resultJson: row.jobResultJson ?? null,
+    attemptCount: row.jobAttemptCount,
+    createdAt: row.jobCreatedAt,
+    updatedAt: row.jobUpdatedAt,
+  });
+
+  const target: PollTargetRow = {
+    id: row.targetId,
+    deviceId: row.targetDeviceId,
+    profileId: row.targetProfileId,
+    enabled: Boolean(row.targetEnabled),
+    createdAt: row.targetCreatedAt,
+    updatedAt: row.targetUpdatedAt,
+  };
+
+  const device: DeviceRow = {
+    id: row.deviceId,
+    hostname: row.deviceHostname,
+    ipAddress: row.deviceIpAddress,
+    enabled: Boolean(row.deviceEnabled),
+    site: row.deviceSite ?? null,
+    org: row.deviceOrg ?? null,
+    createdAt: row.deviceCreatedAt,
+    updatedAt: row.deviceUpdatedAt,
+  };
+
+  const profile: PollProfileRow = {
+    id: row.profileId,
+    kind: row.profileKind,
+    name: row.profileName,
+    intervalSec: row.profileIntervalSec,
+    timeoutMs: row.profileTimeoutMs,
+    retries: row.profileRetries,
+    enabled: Boolean(row.profileEnabled),
+    config: safeParseJson(row.profileConfigJson ?? "{}"),
+    createdAt: row.profileCreatedAt,
+    updatedAt: row.profileUpdatedAt,
+  };
+
+  return { job, target, device, profile };
+}
+
+export function getRunningPollJobDetailForLeaseOwner(
+  db: DB,
+  leaseOwner: string
+): {
+  job: PollJobRow;
+  target: PollTargetRow;
+  device: DeviceRow;
+  profile: PollProfileRow;
+} | null {
+  const row = db
+    .prepare(
+      `SELECT id FROM poll_jobs
+       WHERE status = 'running' AND lease_owner = ?
+       ORDER BY id ASC
+       LIMIT 1`
+    )
+    .get(leaseOwner) as { id: number } | undefined;
+  if (!row) return null;
+  return getPollJobDetail(db, row.id);
+}
+
+export function listStaleRunningPollJobs(db: DB, olderThanSeconds: number): PollJobRow[] {
+  const threshold = new Date(Date.now() - olderThanSeconds * 1000).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+              started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+              attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_jobs
+       WHERE status = 'running' AND updated_at < ?
+       ORDER BY id`
+    )
+    .all(threshold) as any[];
+  return rows.map((r) => ({ ...r, result: safeParseJson(r.resultJson ?? null), leaseOwner: r.leaseOwner ?? null }));
+}
+
+export function requeueStaleRunningPollJobs(db: DB, olderThanSeconds: number): PollJobRow[] {
+  const threshold = new Date(Date.now() - olderThanSeconds * 1000).toISOString();
+  const now = new Date().toISOString();
+
+  const rows = db
+    .prepare(
+      `SELECT id FROM poll_jobs WHERE status = 'running' AND updated_at < ? ORDER BY id`
+    )
+    .all(threshold) as Array<{ id: number }>;
+
+  const tx = db.transaction((ids: Array<{ id: number }>) => {
+    ids.forEach((r) => {
+      db.prepare(
+        `UPDATE poll_jobs
+         SET status = 'pending', lease_owner = NULL, started_at = NULL, finished_at = NULL, result_json = NULL, updated_at = ?
+         WHERE id = ? AND status = 'running'`
+      ).run(now, r.id);
+    });
+    return ids.map((r) => getPollJobById(db, r.id)).filter(Boolean) as PollJobRow[];
+  });
+
+  return rows.length ? tx(rows) : [];
+}
+
+export function claimNextPendingPollJobForWorker(db: DB, input: { workerName: string; workerType: string }): PollJobRow | null {
+  const now = new Date().toISOString();
+  const row = db
+    .prepare(
+      `SELECT pj.id
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pj.target_id = pt.id
+       JOIN poll_profiles pp ON pt.profile_id = pp.id
+       WHERE pj.status = 'pending' AND pp.kind = ?
+       ORDER BY pj.id
+       LIMIT 1`
+    )
+    .get(input.workerType) as { id: number } | undefined;
+
+  if (!row) return null;
+
+  db.prepare(
+    `UPDATE poll_jobs
+     SET status = 'running', lease_owner = ?, started_at = ?, attempt_count = attempt_count + 1, updated_at = ?
+     WHERE id = ? AND status = 'pending'`
+  ).run(input.workerName, now, now, row.id);
+
+  return getPollJobById(db, row.id);
+}
+
+export function listRunningPollJobsForWorker(db: DB, workerName: string): PollJobRow[] {
+  const rows = db
+    .prepare(
+      `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+              started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+              attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_jobs
+       WHERE status = 'running' AND lease_owner = ?
+       ORDER BY id`
+    )
+    .all(workerName) as any[];
+  return rows.map((r) => ({ ...r, result: safeParseJson(r.resultJson ?? null), leaseOwner: r.leaseOwner ?? null }));
+}
+
+export function requeueStaleRunningPollJobsForWorker(db: DB, input: { workerName: string; olderThanSeconds: number }): PollJobRow[] {
+  const threshold = new Date(Date.now() - input.olderThanSeconds * 1000).toISOString();
+  const now = new Date().toISOString();
+
+  const rows = db
+    .prepare(
+      `SELECT id FROM poll_jobs WHERE status = 'running' AND lease_owner = ? AND updated_at < ? ORDER BY id`
+    )
+    .all(input.workerName, threshold) as Array<{ id: number }>;
+
+  const tx = db.transaction((ids: Array<{ id: number }>) => {
+    ids.forEach((r) => {
+      db.prepare(
+        `UPDATE poll_jobs
+         SET status = 'pending', lease_owner = NULL, started_at = NULL, finished_at = NULL, result_json = NULL, updated_at = ?
+         WHERE id = ? AND status = 'running'`
+      ).run(now, r.id);
+    });
+    return ids.map((r) => getPollJobById(db, r.id)).filter(Boolean) as PollJobRow[];
+  });
+
+  return rows.length ? tx(rows) : [];
+}
+
+export function claimNextPendingPollJobForWorkerCapabilities(db: DB, input: { workerName: string; supportedKinds: string[] }): PollJobRow | null {
+  if (!input.supportedKinds.length) return null;
+  const now = new Date().toISOString();
+  const placeholders = input.supportedKinds.map(() => "?").join(",");
+  const row = db
+    .prepare(
+      `SELECT pj.id
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pj.target_id = pt.id
+       JOIN poll_profiles pp ON pt.profile_id = pp.id
+       WHERE pj.status = 'pending' AND pp.kind IN (${placeholders})
+       ORDER BY pj.id
+       LIMIT 1`
+    )
+    .get(...input.supportedKinds) as { id: number } | undefined;
+
+  if (!row) return null;
+
+  db.prepare(
+    `UPDATE poll_jobs
+     SET status = 'running', lease_owner = ?, started_at = ?, attempt_count = attempt_count + 1, updated_at = ?
+     WHERE id = ? AND status = 'pending'`
+  ).run(input.workerName, now, now, row.id);
+
+  return getPollJobById(db, row.id);
+}
+
+export function abandonStaleRunningPollJobsForWorker(db: DB, input: { workerName: string; olderThanSeconds: number; result?: any | null }): PollJobRow[] {
+  const threshold = new Date(Date.now() - input.olderThanSeconds * 1000).toISOString();
+  const now = new Date().toISOString();
+  const resultJson = JSON.stringify(input.result ?? null);
+
+  const rows = db
+    .prepare(
+      `SELECT id FROM poll_jobs WHERE status = 'running' AND lease_owner = ? AND updated_at < ? ORDER BY id`
+    )
+    .all(input.workerName, threshold) as Array<{ id: number }>;
+
+  const tx = db.transaction((ids: Array<{ id: number }>) => {
+    ids.forEach((r) => {
+      db.prepare(
+        `UPDATE poll_jobs
+         SET status = 'failed', finished_at = ?, result_json = ?, updated_at = ?
+         WHERE id = ? AND status = 'running'`
+      ).run(now, resultJson, now, r.id);
+    });
+    return ids.map((r) => getPollJobById(db, r.id)).filter(Boolean) as PollJobRow[];
+  });
+
+  return rows.length ? tx(rows) : [];
+}
+
+export function retryFailedPollJobsForWorker(db: DB, input: { workerName: string; olderThanSeconds?: number }): PollJobRow[] {
+  const nowIso = new Date();
+  const threshold = input.olderThanSeconds !== undefined ? new Date(Date.now() - input.olderThanSeconds * 1000).toISOString() : null;
+
+  const rows = db
+    .prepare(
+      `SELECT id, target_id as targetId FROM poll_jobs
+       WHERE status = 'failed' AND lease_owner = ?
+       ${threshold ? "AND updated_at < ?" : ""}
+       ORDER BY id`
+    )
+    .all(threshold ? [input.workerName, threshold] : [input.workerName]) as Array<{ id: number; targetId: number }>;
+
+  const tx = db.transaction((ids: Array<{ id: number; targetId: number }>) => {
+    return ids.map((r) => createPollJob(db, { targetId: r.targetId }));
+  });
+
+  return rows.length ? tx(rows) : [];
+}
+
+export function listFailedPollJobsForWorker(db: DB, input: { workerName: string; olderThanSeconds?: number }): PollJobRow[] {
+  const threshold =
+    input.olderThanSeconds !== undefined ? new Date(Date.now() - input.olderThanSeconds * 1000).toISOString() : null;
+  const rows = db
+    .prepare(
+      `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+              started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+              attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_jobs
+       WHERE status = 'failed' AND lease_owner = ? ${threshold ? "AND updated_at < ?" : ""}
+       ORDER BY id`
+    )
+    .all(threshold ? [input.workerName, threshold] : [input.workerName]) as any[];
+  return rows.map((r) => ({ ...r, result: safeParseJson(r.resultJson ?? null), leaseOwner: r.leaseOwner ?? null }));
+}
+
+export function listCompletedPollJobsForWorker(db: DB, input: { workerName: string; olderThanSeconds?: number }): PollJobRow[] {
+  const threshold =
+    input.olderThanSeconds !== undefined ? new Date(Date.now() - input.olderThanSeconds * 1000).toISOString() : null;
+  const rows = db
+    .prepare(
+      `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+              started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+              attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_jobs
+       WHERE status = 'completed' AND lease_owner = ? ${threshold ? "AND updated_at < ?" : ""}
+       ORDER BY id`
+    )
+    .all(threshold ? [input.workerName, threshold] : [input.workerName]) as any[];
+  return rows.map((r) => ({ ...r, result: safeParseJson(r.resultJson ?? null), leaseOwner: r.leaseOwner ?? null }));
+}
+
+export function getPollJobSummaryForWorker(db: DB, workerName: string): {
+  workerName: string;
+  total: number;
+  pending: number;
+  running: number;
+  completed: number;
+  failed: number;
+} {
+  const counts = db
+    .prepare(
+      `SELECT status, COUNT(*) as cnt
+       FROM poll_jobs
+       WHERE lease_owner = ?
+       GROUP BY status`
+    )
+    .all(workerName) as Array<{ status: string; cnt: number }>;
+
+  let running = 0;
+  let completed = 0;
+  let failed = 0;
+  counts.forEach((row) => {
+    if (row.status === "running") running = row.cnt;
+    else if (row.status === "completed") completed = row.cnt;
+    else if (row.status === "failed") failed = row.cnt;
+  });
+
+  const total = running + completed + failed;
+
+  return {
+    workerName,
+    total,
+    pending: 0,
+    running,
+    completed,
+    failed,
+  };
+}
+
+export function getPollJobSummary(db: DB, input?: { workerName?: string; workerType?: "ping" | "snmp" }): {
+  total: number;
+  pending: number;
+  running: number;
+  completed: number;
+  failed: number;
+  filters: { workerName?: string; workerType?: "ping" | "snmp" };
+} {
+  const workerName = input?.workerName?.trim();
+  const workerType = input?.workerType;
+
+  const joins = workerType
+    ? ` JOIN poll_targets pt ON pj.target_id = pt.id JOIN poll_profiles pp ON pt.profile_id = pp.id `
+    : "";
+
+  const whereParts: string[] = ["status IN ('running','completed','failed')"];
+  const params: any[] = [];
+
+  if (workerName) {
+    whereParts.push("pj.lease_owner = ?");
+    params.push(workerName);
+  }
+  if (workerType) {
+    whereParts.push("pp.kind = ?");
+    params.push(workerType);
+  }
+  const where = `WHERE ${whereParts.join(" AND ")}`;
+
+  // running/completed/failed counts
+  const rows = db
+    .prepare(
+      `SELECT status, COUNT(*) as cnt
+       FROM poll_jobs pj
+       ${joins}
+       ${where}
+       GROUP BY status`
+    )
+    .all(...params) as Array<{ status: string; cnt: number }>;
+
+  let running = 0;
+  let completed = 0;
+  let failed = 0;
+  rows.forEach((row) => {
+    if (row.status === "running") running = row.cnt;
+    else if (row.status === "completed") completed = row.cnt;
+    else if (row.status === "failed") failed = row.cnt;
+  });
+
+  // pending count (pending jobs have no lease_owner; if workerName filter supplied, pending is 0)
+  let pending = 0;
+  if (!workerName) {
+    const pendingParams: any[] = [];
+    const pendingWhereParts: string[] = ["status = 'pending'"];
+    if (workerType) {
+      pendingWhereParts.push("pp.kind = ?");
+      pendingParams.push(workerType);
+    }
+    const pendingWhere = pendingWhereParts.length ? `WHERE ${pendingWhereParts.join(" AND ")}` : "";
+    const pendingRow = db
+      .prepare(
+        `SELECT COUNT(*) as cnt
+         FROM poll_jobs pj
+         ${joins}
+         ${pendingWhere}`
+      )
+      .get(...pendingParams) as { cnt: number };
+    pending = pendingRow?.cnt ?? 0;
+  }
+
+  const total = pending + running + completed + failed;
+
+  return {
+    total,
+    pending,
+    running,
+    completed,
+    failed,
+    filters: {
+      ...(workerName ? { workerName } : {}),
+      ...(workerType ? { workerType } : {}),
+    },
+  };
+}
+
+export function getStalePollJobSummary(db: DB, input: { olderThanSeconds: number; workerName?: string; workerType?: "ping" | "snmp" }): {
+  olderThanSeconds: number;
+  total: number;
+  staleRunning: number;
+  staleFailed: number;
+  staleCompleted: number;
+  filters: { workerName?: string; workerType?: "ping" | "snmp" };
+} {
+  const threshold = new Date(Date.now() - input.olderThanSeconds * 1000).toISOString();
+  const workerName = input.workerName?.trim();
+  const workerType = input.workerType;
+
+  const joins = workerType
+    ? ` JOIN poll_targets pt ON pj.target_id = pt.id JOIN poll_profiles pp ON pt.profile_id = pp.id `
+    : "";
+
+  const whereParts: string[] = ["pj.status IN ('running','completed','failed')", "pj.updated_at < ?"];
+  const params: any[] = [threshold];
+
+  if (workerName) {
+    whereParts.push("pj.lease_owner = ?");
+    params.push(workerName);
+  }
+  if (workerType) {
+    whereParts.push("pp.kind = ?");
+    params.push(workerType);
+  }
+  const where = `WHERE ${whereParts.join(" AND ")}`;
+
+  const rows = db
+    .prepare(
+      `SELECT status, COUNT(*) as cnt
+       FROM poll_jobs pj
+       ${joins}
+       ${where}
+       GROUP BY status`
+    )
+    .all(...params) as Array<{ status: string; cnt: number }>;
+
+  let staleRunning = 0;
+  let staleCompleted = 0;
+  let staleFailed = 0;
+  rows.forEach((row) => {
+    if (row.status === "running") staleRunning = row.cnt;
+    else if (row.status === "completed") staleCompleted = row.cnt;
+    else if (row.status === "failed") staleFailed = row.cnt;
+  });
+
+  const total = staleRunning + staleCompleted + staleFailed;
+
+  return {
+    olderThanSeconds: input.olderThanSeconds,
+    total,
+    staleRunning,
+    staleFailed,
+    staleCompleted,
+    filters: {
+      ...(workerName ? { workerName } : {}),
+      ...(workerType ? { workerType } : {}),
+    },
+  };
+}
+
+export function getPendingPollJobAvailabilityForWorkerCapabilities(db: DB, input: { supportedKinds: string[] }): {
+  totalPendingCompatible: number;
+  byKind: Array<{ kind: string; count: number }>;
+} {
+  if (!input.supportedKinds.length) {
+    return { totalPendingCompatible: 0, byKind: [] };
+  }
+  const placeholders = input.supportedKinds.map(() => "?").join(",");
+  const rows = db
+    .prepare(
+      `SELECT pp.kind as kind, COUNT(*) as count
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pj.target_id = pt.id
+       JOIN poll_profiles pp ON pt.profile_id = pp.id
+       WHERE pj.status = 'pending' AND pp.kind IN (${placeholders})
+       GROUP BY pp.kind
+       ORDER BY pp.kind ASC`
+    )
+    .all(...input.supportedKinds) as Array<{ kind: string; count: number }>;
+
+  const totalPendingCompatible = rows.reduce((acc, r) => acc + (r.count ?? 0), 0);
+  return { totalPendingCompatible, byKind: rows };
+}
+
+export function listStaleRunningPollJobsForWorker(db: DB, input: { workerName: string; olderThanSeconds: number }): PollJobRow[] {
+  const threshold = new Date(Date.now() - input.olderThanSeconds * 1000).toISOString();
+  const rows = db
+    .prepare(
+      `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
+              started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
+              attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_jobs
+       WHERE status = 'running' AND lease_owner = ? AND updated_at < ?
+       ORDER BY id`
+    )
+    .all(input.workerName, threshold) as any[];
+  return rows.map((r) => ({ ...r, result: safeParseJson(r.resultJson ?? null), leaseOwner: r.leaseOwner ?? null }));
+}
+
+export function createPollJob(db: DB, input: { targetId: number; scheduledAt?: string; status?: string }): PollJobRow {
+  const now = new Date().toISOString();
+  const scheduledAt = input.scheduledAt ?? now;
+  const status = input.status ?? "pending";
+  const result = db
+    .prepare(
+      `INSERT INTO poll_jobs (target_id, status, scheduled_at, started_at, finished_at, lease_owner, result_json, attempt_count, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(input.targetId, status, scheduledAt, null, null, null, null, 0, now, now);
+  return {
+    id: Number(result.lastInsertRowid),
+    targetId: input.targetId,
+    status,
+    scheduledAt,
+    startedAt: null,
+    finishedAt: null,
+    leaseOwner: null,
+    attemptCount: 0,
+    result: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export type AgentEnrollmentRow = {
+  id: number;
+  enrollmentId: string;
+  agentType: string;
+  token: string;
+  status: string;
+  companySlug: string | null;
+  deploymentId: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  lastUsedAt: string | null;
+  changedBy: string | null;
+  updatedAt: string;
+};
+
+export function listAgentEnrollments(db: DB, status?: "active" | "revoked"): AgentEnrollmentRow[] {
+  const base =
+    `SELECT id, enrollment_id as enrollmentId, agent_type as agentType, token, status,
+            company_slug as companySlug, deployment_id as deploymentId,
+            created_at as createdAt, expires_at as expiresAt, last_used_at as lastUsedAt, changed_by as changedBy, updated_at as updatedAt
+     FROM agent_enrollments`;
+  if (status === "active" || status === "revoked") {
+    return db.prepare(`${base} WHERE status = ? ORDER BY id`).all(status) as AgentEnrollmentRow[];
+  }
+  return db.prepare(`${base} ORDER BY id`).all() as AgentEnrollmentRow[];
+}
+
+export function createAgentEnrollment(db: DB, input: {
+  enrollmentId: string;
+  agentType: string;
+  token: string;
+  status?: string;
+  companySlug?: string | null;
+  deploymentId?: string | null;
+  expiresAt?: string | null;
+  changedBy?: string | null;
+}): AgentEnrollmentRow {
+  const now = new Date().toISOString();
+  const status = input.status ?? "active";
+  const result = db
+    .prepare(
+      `INSERT INTO agent_enrollments (enrollment_id, agent_type, token, status, company_slug, deployment_id, created_at, expires_at, last_used_at, changed_by, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(
+      input.enrollmentId,
+      input.agentType,
+      input.token,
+      status,
+      input.companySlug ?? null,
+      input.deploymentId ?? null,
+      now,
+      input.expiresAt ?? null,
+      null,
+      input.changedBy ?? null,
+      now
+    );
+  return {
+    id: Number(result.lastInsertRowid),
+    enrollmentId: input.enrollmentId,
+    agentType: input.agentType,
+    token: input.token,
+    status,
+    companySlug: input.companySlug ?? null,
+    deploymentId: input.deploymentId ?? null,
+    createdAt: now,
+    expiresAt: input.expiresAt ?? null,
+    lastUsedAt: null,
+    changedBy: input.changedBy ?? null,
+    updatedAt: now,
+  };
+}
+
+export function revokeAgentEnrollment(db: DB, enrollmentId: string, changedBy?: string | null): AgentEnrollmentRow | null {
+  const existing = db
+    .prepare(
+      `SELECT id, enrollment_id as enrollmentId, agent_type as agentType, token, status,
+              company_slug as companySlug, deployment_id as deploymentId,
+              created_at as createdAt, expires_at as expiresAt, last_used_at as lastUsedAt, changed_by as changedBy, updated_at as updatedAt
+       FROM agent_enrollments WHERE enrollment_id = ? LIMIT 1`
+    )
+    .get(enrollmentId) as AgentEnrollmentRow | undefined;
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE agent_enrollments SET status = ?, changed_by = ?, updated_at = ? WHERE enrollment_id = ?`
+  ).run("revoked", changedBy ?? existing.changedBy ?? null, now, enrollmentId);
+  return { ...existing, status: "revoked", changedBy: changedBy ?? existing.changedBy ?? null, updatedAt: now };
+}
+
+export function getAgentEnrollmentByEnrollmentId(db: DB, enrollmentId: string): AgentEnrollmentRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, enrollment_id as enrollmentId, agent_type as agentType, token, status,
+              company_slug as companySlug, deployment_id as deploymentId,
+              created_at as createdAt, expires_at as expiresAt, last_used_at as lastUsedAt, changed_by as changedBy, updated_at as updatedAt
+       FROM agent_enrollments WHERE enrollment_id = ? LIMIT 1`
+    )
+    .get(enrollmentId) as AgentEnrollmentRow | undefined;
+  return row ?? null;
+}
+
+export function getAgentEnrollmentByToken(db: DB, token: string): AgentEnrollmentRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, enrollment_id as enrollmentId, agent_type as agentType, token, status,
+              company_slug as companySlug, deployment_id as deploymentId,
+              created_at as createdAt, expires_at as expiresAt, last_used_at as lastUsedAt, changed_by as changedBy, updated_at as updatedAt
+       FROM agent_enrollments WHERE token = ? LIMIT 1`
+    )
+    .get(token) as AgentEnrollmentRow | undefined;
+  return row ?? null;
+}
+
+export function touchAgentEnrollmentLastUsedAt(db: DB, enrollmentId: string): void {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE agent_enrollments SET last_used_at = ?, updated_at = ? WHERE enrollment_id = ?`
+  ).run(now, now, enrollmentId);
+}
+
+export function updateAgentEnrollmentStatus(db: DB, enrollmentId: string, status: "active" | "revoked", changedBy?: string | null): AgentEnrollmentRow | null {
+  const existing = getAgentEnrollmentByEnrollmentId(db, enrollmentId);
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE agent_enrollments SET status = ?, changed_by = ?, updated_at = ? WHERE enrollment_id = ?`
+  ).run(status, changedBy ?? existing.changedBy ?? null, now, enrollmentId);
+  return { ...existing, status, changedBy: changedBy ?? existing.changedBy ?? null, updatedAt: now };
+}
+
+export function normalizeCompanySlug(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function isCompanySlugInUse(db: DB, slug: string, excludeId?: number): boolean {
+  if (!slug) return false;
+  const row = db
+    .prepare(
+      `SELECT id FROM companies WHERE company_slug = ? ${excludeId ? "AND id != ?" : ""} LIMIT 1`
+    )
+    .get(excludeId ? [slug, excludeId] : [slug]) as { id: number } | undefined;
+  return Boolean(row);
+}
+
+export function generateDeploymentId(): string {
+  return `dep-${randomUUID().replace(/-/g, "")}`;
+}
+
+export function generateEnrollmentToken(): string {
+  return `enr-${randomUUID().replace(/-/g, "")}`;
+}
+
+export function generateEnrollmentId(): string {
+  return `enr-id-${randomUUID().replace(/-/g, "")}`;
+}
+
+export type CompanyRow = {
+  id: number;
+  companyName: string;
+  companySlug: string;
+  orgId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function getCompany(db: DB): CompanyRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, company_name as companyName, company_slug as companySlug, org_id as orgId,
+              created_at as createdAt, updated_at as updatedAt
+       FROM companies ORDER BY id LIMIT 1`
+    )
+    .get() as CompanyRow | undefined;
+  return row ?? null;
+}
+
+export function upsertCompany(db: DB, input: { companyName: string; companySlug: string; orgId?: string | null }): CompanyRow {
+  const existing = getCompany(db);
+  const now = new Date().toISOString();
+  const duplicate = isCompanySlugInUse(db, input.companySlug, existing?.id);
+  if (duplicate) {
+    const err: any = new Error("company_slug_in_use");
+    err.code = "company_slug_in_use";
+    throw err;
+  }
+  if (existing) {
+    db.prepare(
+      `UPDATE companies SET company_name = ?, company_slug = ?, org_id = ?, updated_at = ? WHERE id = ?`
+    ).run(input.companyName, input.companySlug, input.orgId ?? null, now, existing.id);
+    return { ...existing, companyName: input.companyName, companySlug: input.companySlug, orgId: input.orgId ?? null, updatedAt: now };
+  }
+  const result = db
+    .prepare(
+      `INSERT INTO companies (company_name, company_slug, org_id, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)`
+    )
+    .run(input.companyName, input.companySlug, input.orgId ?? null, now, now);
+  return {
+    id: Number(result.lastInsertRowid),
+    companyName: input.companyName,
+    companySlug: input.companySlug,
+    orgId: input.orgId ?? null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export type DeploymentRow = {
+  id: number;
+  deploymentId: string;
+  deploymentName: string;
+  mode: string;
+  registeredToCloud: boolean;
+  buildChannel: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function getDeployment(db: DB): DeploymentRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, deployment_id as deploymentId, deployment_name as deploymentName, mode,
+              registered_to_cloud as registeredToCloud, build_channel as buildChannel,
+              created_at as createdAt, updated_at as updatedAt
+       FROM deployments ORDER BY id LIMIT 1`
+    )
+    .get() as
+    | {
+        id: number;
+        deploymentId: string;
+        deploymentName: string;
+        mode: string;
+        registeredToCloud: number;
+        buildChannel: string | null;
+        createdAt: string;
+        updatedAt: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return { ...row, registeredToCloud: Boolean(row.registeredToCloud) };
+}
+
+export function upsertDeployment(db: DB, input: {
+  deploymentId: string;
+  deploymentName: string;
+  mode: string;
+  registeredToCloud?: boolean;
+  buildChannel?: string | null;
+}): DeploymentRow {
+  const existing = getDeployment(db);
+  const now = new Date().toISOString();
+  const registered = input.registeredToCloud ?? false;
+  if (existing) {
+    db.prepare(
+      `UPDATE deployments
+       SET deployment_id = ?, deployment_name = ?, mode = ?, registered_to_cloud = ?, build_channel = ?, updated_at = ?
+       WHERE id = ?`
+    ).run(input.deploymentId, input.deploymentName, input.mode, registered ? 1 : 0, input.buildChannel ?? null, now, existing.id);
+    return {
+      ...existing,
+      deploymentId: input.deploymentId,
+      deploymentName: input.deploymentName,
+      mode: input.mode,
+      registeredToCloud: registered,
+      buildChannel: input.buildChannel ?? null,
+      updatedAt: now,
+    };
+  }
+  const result = db
+    .prepare(
+      `INSERT INTO deployments (deployment_id, deployment_name, mode, registered_to_cloud, build_channel, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .run(input.deploymentId, input.deploymentName, input.mode, registered ? 1 : 0, input.buildChannel ?? null, now, now);
+  return {
+    id: Number(result.lastInsertRowid),
+    deploymentId: input.deploymentId,
+    deploymentName: input.deploymentName,
+    mode: input.mode,
+    registeredToCloud: registered,
+    buildChannel: input.buildChannel ?? null,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export type CloudSyncStateRow = {
+  enabled: boolean;
+  status: string;
+  lastSyncAt: string | null;
+  cloudEndpoint: string | null;
+  tenantKey: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export function getCloudSyncState(db: DB): CloudSyncStateRow {
+  const row = db
+    .prepare(
+      `SELECT enabled, status, last_sync_at as lastSyncAt, cloud_endpoint as cloudEndpoint, tenant_key as tenantKey,
+              created_at as createdAt, updated_at as updatedAt
+       FROM cloud_sync_state WHERE id = 1`
+    )
+    .get() as
+    | {
+        enabled: number;
+        status: string;
+        lastSyncAt: string | null;
+        cloudEndpoint: string | null;
+        tenantKey: string | null;
+        createdAt: string;
+        updatedAt: string;
+      }
+    | undefined;
+  if (!row) {
+    return {
+      enabled: false,
+      status: "not-configured",
+      lastSyncAt: null,
+      cloudEndpoint: null,
+      tenantKey: null,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+  }
+  return { ...row, enabled: Boolean(row.enabled) };
+}
+
+export function updateCloudSyncState(db: DB, input: Partial<{
+  enabled: boolean;
+  status: string;
+  lastSyncAt: string | null;
+  cloudEndpoint: string | null;
+  tenantKey: string | null;
+}>): CloudSyncStateRow {
+  const current = getCloudSyncState(db);
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE cloud_sync_state
+     SET enabled = ?, status = ?, last_sync_at = ?, cloud_endpoint = ?, tenant_key = ?, updated_at = ?
+     WHERE id = 1`
+  ).run(
+    input.enabled !== undefined ? (input.enabled ? 1 : 0) : current.enabled ? 1 : 0,
+    input.status ?? current.status,
+    input.lastSyncAt !== undefined ? input.lastSyncAt : current.lastSyncAt,
+    input.cloudEndpoint !== undefined ? input.cloudEndpoint : current.cloudEndpoint,
+    input.tenantKey !== undefined ? input.tenantKey : current.tenantKey,
+    now
+  );
+  return {
+    enabled: input.enabled ?? current.enabled,
+    status: input.status ?? current.status,
+    lastSyncAt: input.lastSyncAt !== undefined ? input.lastSyncAt : current.lastSyncAt,
+    cloudEndpoint: input.cloudEndpoint !== undefined ? input.cloudEndpoint : current.cloudEndpoint,
+    tenantKey: input.tenantKey !== undefined ? input.tenantKey : current.tenantKey,
+    createdAt: current.createdAt,
+    updatedAt: now,
+  };
 }

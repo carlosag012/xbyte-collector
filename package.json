@@ -8,7 +8,10 @@
     "build:api": "tsc -p tsconfig.json",
     "build:web": "cd web && npm run build",
     "start": "node dist/src/server.js",
-    "dev": "tsx watch src/server.ts"
+    "dev": "tsx watch src/server.ts",
+    "worker:ping": "tsx src/worker-ping.ts",
+    "worker:snmp": "tsx src/worker-snmp.ts",
+    "workers:start": "tsx src/workers-supervisor.ts"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.5",
