@@ -309,32 +309,43 @@ async function snmpGetSystem(snmpGetPath: string, target: string, profileConfig:
 
 async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number) {
   const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
-  const oids = [
-    "1.3.6.1.2.1.31.1.1.1.1", // ifName
-    "1.3.6.1.2.1.2.2.1.2", // ifDescr
-    "1.3.6.1.2.1.31.1.1.1.18", // ifAlias
-    "1.3.6.1.2.1.2.2.1.7", // ifAdminStatus
-    "1.3.6.1.2.1.2.2.1.8", // ifOperStatus
-    "1.3.6.1.2.1.2.2.1.5", // ifSpeed
-    "1.3.6.1.2.1.31.1.1.1.15", // ifHighSpeed
-    "1.3.6.1.2.1.2.2.1.4", // ifMtu
-    "1.3.6.1.2.1.2.2.1.6", // ifPhysAddress
+  const oidList = [
+    "1.3.6.1.2.1.31.1.1.1.1",
+    "1.3.6.1.2.1.2.2.1.2",
+    "1.3.6.1.2.1.31.1.1.1.18",
+    "1.3.6.1.2.1.2.2.1.7",
+    "1.3.6.1.2.1.2.2.1.8",
+    "1.3.6.1.2.1.2.2.1.5",
+    "1.3.6.1.2.1.31.1.1.1.15",
+    "1.3.6.1.2.1.2.2.1.4",
+    "1.3.6.1.2.1.2.2.1.6",
   ];
-  const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), ...oids];
-  const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
-  return parseInterfaces(stdout);
+  const results: string[] = [];
+  for (const oid of oidList) {
+    const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), oid];
+    const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
+    results.push(stdout);
+  }
+  return parseInterfaces(results.join("\n"));
 }
 
 async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number) {
   const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
-  const oids = [
-    "1.0.8802.1.1.2.1.3.7", // lldpLocPortTable
-    "1.0.8802.1.1.2.1.4.1", // lldpRemTable
-    "1.0.8802.1.1.2.1.4.2", // lldpRemManAddrTable
-  ];
-  const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), ...oids];
-  const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
-  return parseLldp(stdout);
+  const trees = {
+    remoteChassisId: "1.0.8802.1.1.2.1.4.1.1.5",
+    remotePortId: "1.0.8802.1.1.2.1.4.1.1.7",
+    remoteSysName: "1.0.8802.1.1.2.1.4.1.1.9",
+    remoteSysDesc: "1.0.8802.1.1.2.1.4.1.1.10",
+    remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
+    localPortId: "1.0.8802.1.1.2.1.3.7.1.3",
+  };
+  const outputs: Record<string, string> = {};
+  for (const [key, oid] of Object.entries(trees)) {
+    const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), oid];
+    const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
+    outputs[key] = stdout;
+  }
+  return parseLldp(outputs);
 }
 
 function buildSnmpBaseArgs(profileConfig: any, target: string, timeoutSec: number): string[] {
@@ -362,11 +373,12 @@ function parseSnmpGet(stdout: string): Record<string, string> {
   const lines = stdout.trim().split("\n");
   const out: Record<string, string> = {};
   for (const line of lines) {
-    const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
-    if (!oidPart || !rest) continue;
-    const oidFull = (oidPart.includes("::") ? oidPart.split("::")[1] : oidPart).split(" ")[0];
-    const val = rest.split(":").slice(1).join(":").trim();
-    out[oidFull] = val;
+    const [oidPartRaw, restRaw] = line.split(" = ").map((s) => s.trim());
+    if (!oidPartRaw || !restRaw) continue;
+    const oidPart = normalizeOidNumeric(oidPartRaw);
+    const [type, ...valParts] = restRaw.split(":").map((s) => s.trim());
+    const value = valParts.join(":").trim();
+    out[oidPart.split(" ")[0]] = value;
   }
   return out;
 }
@@ -421,38 +433,40 @@ function parseInterfaces(stdout: string) {
   }));
 }
 
-function parseLldp(stdout: string) {
-  const neighbors: any[] = [];
-  const lines = stdout.trim().split("\n").filter((l) => l.trim().length);
-  const prefixes = {
-    remoteSysName: "1.0.8802.1.1.2.1.4.1.1.9",
-    remotePortId: "1.0.8802.1.1.2.1.4.1.1.7",
+function parseLldp(outputs: Record<string, string>) {
+  const neighbors = new Map<string, any>();
+  const add = (key: string, suffix: string, value: string) => {
+    const rec = neighbors.get(suffix) ?? {};
+    rec[key] = value;
+    neighbors.set(suffix, rec);
+  };
+
+  const parseTree = (data: string, key: string) => {
+    const lines = data.trim().split("\n").filter((l) => l.trim().length);
+    for (const line of lines) {
+      const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
+      if (!oidPart || !rest) continue;
+      const oidFull = normalizeOidNumeric(oidPart);
+      const suffix = oidFull.split(keyToPrefixMap[key] + ".")[1] || "";
+      const val = rest.split(":").slice(1).join(":").trim();
+      add(key, suffix, val);
+    }
+  };
+
+  const keyToPrefixMap: Record<string, string> = {
     remoteChassisId: "1.0.8802.1.1.2.1.4.1.1.5",
+    remotePortId: "1.0.8802.1.1.2.1.4.1.1.7",
+    remoteSysName: "1.0.8802.1.1.2.1.4.1.1.9",
+    remoteSysDesc: "1.0.8802.1.1.2.1.4.1.1.10",
     remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
     localPort: "1.0.8802.1.1.2.1.3.7.1.3",
   };
-  for (const line of lines) {
-    const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
-    if (!oidPart || !rest) continue;
-    const oidFull = normalizeOidNumeric(oidPart);
-    const val = rest.split(":").slice(1).join(":").trim();
-    const entry = Object.entries(prefixes).find(([_, prefix]) => oidFull.startsWith(prefix + "."));
-    if (!entry) continue;
-    const [key, prefix] = entry;
-    const suffix = oidFull.slice(prefix.length + 1);
-    const nKey = key === "localPort" ? `loc-${suffix}` : `rem-${suffix}`;
-    let existing = neighbors.find((n) => n.__k === nKey);
-    if (!existing) {
-      existing = { __k: nKey };
-      neighbors.push(existing);
-    }
-    if (key === "localPort") existing.localPort = val;
-    else if (key === "remoteSysName") existing.remoteSysName = val;
-    else if (key === "remotePortId") existing.remotePortId = val;
-    else if (key === "remoteChassisId") existing.remoteChassisId = val;
-    else if (key === "remoteMgmtIp") existing.remoteMgmtIp = val;
+
+  for (const key of Object.keys(outputs)) {
+    parseTree(outputs[key], key);
   }
-  return neighbors.map((n) => ({
+
+  return Array.from(neighbors.values()).map((n) => ({
     localPort: n.localPort ?? null,
     remoteSysName: n.remoteSysName ?? null,
     remotePortId: n.remotePortId ?? null,
