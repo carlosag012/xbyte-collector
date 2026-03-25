@@ -337,7 +337,7 @@ async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig:
     remoteSysName: "1.0.8802.1.1.2.1.4.1.1.9",
     remoteSysDesc: "1.0.8802.1.1.2.1.4.1.1.10",
     remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
-    localPortId: "1.0.8802.1.1.2.1.3.7.1.3",
+    localPort: "1.0.8802.1.1.2.1.3.7.1.3",
   };
   const outputs: Record<string, string> = {};
   for (const [key, oid] of Object.entries(trees)) {
@@ -484,7 +484,7 @@ function parseLldp(outputs: Record<string, string>) {
 }
 
 function normalizeOidNumeric(oidPart: string): string {
-  return oidPart.replace(/^iso\\./i, "").replace(/^\\./, "").replace(/^SNMPv2-SMI::/, "");
+  return oidPart.replace(/^iso\./i, "").replace(/^\./, "").replace(/^SNMPv2-SMI::/, "");
 }
 
 function snmpValueToString(raw: string): string {
