@@ -375,10 +375,9 @@ function parseSnmpGet(stdout: string): Record<string, string> {
   for (const line of lines) {
     const [oidPartRaw, restRaw] = line.split(" = ").map((s) => s.trim());
     if (!oidPartRaw || !restRaw) continue;
-    const oidPart = normalizeOidNumeric(oidPartRaw);
-    const [type, ...valParts] = restRaw.split(":").map((s) => s.trim());
-    const value = valParts.join(":").trim();
-    out[oidPart.split(" ")[0]] = value;
+    const oidPart = normalizeOidNumeric(oidPartRaw).split(" ")[0];
+    const value = snmpValueToString(restRaw);
+    out[oidPart] = value;
   }
   return out;
 }
@@ -401,7 +400,7 @@ function parseInterfaces(stdout: string) {
     const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
     if (!oidPart || !rest) continue;
     const oidFull = normalizeOidNumeric(oidPart);
-    const val = rest.split(":").slice(1).join(":").trim();
+    const val = snmpValueToString(rest);
     const matchKey = Object.entries(prefixes).find(([_, prefix]) => oidFull.startsWith(prefix + "."));
     if (!matchKey) continue;
     const [key, prefix] = matchKey;
@@ -434,49 +433,74 @@ function parseInterfaces(stdout: string) {
 }
 
 function parseLldp(outputs: Record<string, string>) {
-  const neighbors = new Map<string, any>();
-  const add = (key: string, suffix: string, value: string) => {
-    const rec = neighbors.get(suffix) ?? {};
-    rec[key] = value;
-    neighbors.set(suffix, rec);
-  };
-
-  const parseTree = (data: string, key: string) => {
-    const lines = data.trim().split("\n").filter((l) => l.trim().length);
-    for (const line of lines) {
-      const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
-      if (!oidPart || !rest) continue;
-      const oidFull = normalizeOidNumeric(oidPart);
-      const suffix = oidFull.split(keyToPrefixMap[key] + ".")[1] || "";
-      const val = rest.split(":").slice(1).join(":").trim();
-      add(key, suffix, val);
-    }
-  };
-
   const keyToPrefixMap: Record<string, string> = {
     remoteChassisId: "1.0.8802.1.1.2.1.4.1.1.5",
     remotePortId: "1.0.8802.1.1.2.1.4.1.1.7",
     remoteSysName: "1.0.8802.1.1.2.1.4.1.1.9",
     remoteSysDesc: "1.0.8802.1.1.2.1.4.1.1.10",
     remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
-    localPort: "1.0.8802.1.1.2.1.3.7.1.3",
+  };
+  const localPortPrefix = "1.0.8802.1.1.2.1.3.7.1.3";
+
+  const remMap = new Map<string, any>();
+  const localPorts = new Map<string, string>();
+
+  const parseTree = (data: string, key: string, prefix: string, sink: Map<string, any>) => {
+    const lines = data.trim().split("\n").filter((l) => l.trim().length);
+    for (const line of lines) {
+      const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
+      if (!oidPart || !rest) continue;
+      const oidFull = normalizeOidNumeric(oidPart);
+      if (!oidFull.startsWith(prefix + ".")) continue;
+      const suffix = oidFull.slice(prefix.length + 1);
+      const val = snmpValueToString(rest);
+      if (sink === localPorts) {
+        sink.set(suffix, val);
+      } else {
+        const rec = sink.get(suffix) ?? {};
+        rec[key] = val;
+        sink.set(suffix, rec);
+      }
+    }
   };
 
-  for (const key of Object.keys(outputs)) {
-    parseTree(outputs[key], key);
+  for (const [k, p] of Object.entries(keyToPrefixMap)) {
+    parseTree(outputs[k] ?? "", k, p, remMap);
   }
+  parseTree(outputs["localPort"] ?? "", "localPort", localPortPrefix, localPorts as any);
 
-  return Array.from(neighbors.values()).map((n) => ({
-    localPort: n.localPort ?? null,
-    remoteSysName: n.remoteSysName ?? null,
-    remotePortId: n.remotePortId ?? null,
-    remoteChassisId: n.remoteChassisId ?? null,
-    remoteMgmtIp: n.remoteMgmtIp ?? null,
-  }));
+  const neighbors: any[] = [];
+  for (const [suffix, rec] of remMap.entries()) {
+    if (!rec.remoteSysName && !rec.remotePortId && !rec.remoteChassisId && !rec.remoteMgmtIp) continue;
+    neighbors.push({
+      localPort: localPorts.get(suffix) ?? null,
+      remoteSysName: rec.remoteSysName ?? null,
+      remotePortId: rec.remotePortId ?? null,
+      remoteChassisId: rec.remoteChassisId ?? null,
+      remoteMgmtIp: rec.remoteMgmtIp ?? null,
+    });
+  }
+  return neighbors;
 }
 
 function normalizeOidNumeric(oidPart: string): string {
   return oidPart.replace(/^iso\\./i, "").replace(/^\\./, "").replace(/^SNMPv2-SMI::/, "");
+}
+
+function snmpValueToString(raw: string): string {
+  const parts = raw.split(":");
+  if (parts.length < 2) return raw.trim();
+  const [, ...rest] = parts;
+  let val = rest.join(":").trim();
+  if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+    val = val.slice(1, -1);
+  }
+  if (val.startsWith("(") && val.includes(")") && /\d/.test(val[1])) {
+    const inside = val.slice(1, val.indexOf(")"));
+    const after = val.slice(val.indexOf(")") + 1).trim();
+    val = after ? `${inside} ${after}` : inside;
+  }
+  return val;
 }
 
 async function runWithConcurrency(tasks: Array<() => Promise<void>>, limit: number, shuttingDown: { flag: boolean }) {
