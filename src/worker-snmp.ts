@@ -310,15 +310,15 @@ async function snmpGetSystem(snmpGetPath: string, target: string, profileConfig:
 async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number) {
   const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
   const oids = [
-    "IF-MIB::ifName",
-    "IF-MIB::ifDescr",
-    "IF-MIB::ifAlias",
-    "IF-MIB::ifAdminStatus",
-    "IF-MIB::ifOperStatus",
-    "IF-MIB::ifSpeed",
-    "IF-MIB::ifHighSpeed",
-    "IF-MIB::ifMtu",
-    "IF-MIB::ifPhysAddress",
+    "1.3.6.1.2.1.31.1.1.1.1", // ifName
+    "1.3.6.1.2.1.2.2.1.2", // ifDescr
+    "1.3.6.1.2.1.31.1.1.1.18", // ifAlias
+    "1.3.6.1.2.1.2.2.1.7", // ifAdminStatus
+    "1.3.6.1.2.1.2.2.1.8", // ifOperStatus
+    "1.3.6.1.2.1.2.2.1.5", // ifSpeed
+    "1.3.6.1.2.1.31.1.1.1.15", // ifHighSpeed
+    "1.3.6.1.2.1.2.2.1.4", // ifMtu
+    "1.3.6.1.2.1.2.2.1.6", // ifPhysAddress
   ];
   const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), ...oids];
   const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
@@ -327,7 +327,11 @@ async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileC
 
 async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number) {
   const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
-  const oids = ["LLDP-MIB::lldpLocPortTable", "LLDP-MIB::lldpRemTable", "LLDP-MIB::lldpRemManAddrTable"];
+  const oids = [
+    "1.0.8802.1.1.2.1.3.7", // lldpLocPortTable
+    "1.0.8802.1.1.2.1.4.1", // lldpRemTable
+    "1.0.8802.1.1.2.1.4.2", // lldpRemManAddrTable
+  ];
   const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), ...oids];
   const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
   return parseLldp(stdout);
@@ -346,12 +350,12 @@ function buildSnmpBaseArgs(profileConfig: any, target: string, timeoutSec: numbe
     if (profileConfig?.privProtocol && profileConfig?.privPassword) {
       args.push("-x", profileConfig.privProtocol, "-X", profileConfig.privPassword);
     }
-    args.push("-t", timeoutSec.toString(), "-r", "1", target);
+    args.push("-On", "-t", timeoutSec.toString(), "-r", "1", target);
     return args;
   }
   const community = profileConfig?.community || "public";
   const versionClean = version || "2c";
-  return ["-v", versionClean, "-c", community, "-t", timeoutSec.toString(), "-r", "1", target];
+  return ["-v", versionClean, "-c", community, "-On", "-t", timeoutSec.toString(), "-r", "1", target];
 }
 
 function parseSnmpGet(stdout: string): Record<string, string> {
@@ -370,24 +374,38 @@ function parseSnmpGet(stdout: string): Record<string, string> {
 function parseInterfaces(stdout: string) {
   const lines = stdout.trim().split("\n").filter((l) => l.trim().length);
   const map = new Map<number, any>();
+  const prefixes = {
+    ifName: "1.3.6.1.2.1.31.1.1.1.1",
+    ifDescr: "1.3.6.1.2.1.2.2.1.2",
+    ifAlias: "1.3.6.1.2.1.31.1.1.1.18",
+    adminStatus: "1.3.6.1.2.1.2.2.1.7",
+    operStatus: "1.3.6.1.2.1.2.2.1.8",
+    ifSpeed: "1.3.6.1.2.1.2.2.1.5",
+    ifHighSpeed: "1.3.6.1.2.1.31.1.1.1.15",
+    ifMtu: "1.3.6.1.2.1.2.2.1.4",
+    ifPhysAddress: "1.3.6.1.2.1.2.2.1.6",
+  };
   for (const line of lines) {
     const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
     if (!oidPart || !rest) continue;
-    const [oidNameFull, idxStr] = oidPart.split(".");
+    const oidFull = normalizeOidNumeric(oidPart);
+    const val = rest.split(":").slice(1).join(":").trim();
+    const matchKey = Object.entries(prefixes).find(([_, prefix]) => oidFull.startsWith(prefix + "."));
+    if (!matchKey) continue;
+    const [key, prefix] = matchKey;
+    const idxStr = oidFull.slice(prefix.length + 1);
     const idx = Number(idxStr);
     if (!Number.isFinite(idx)) continue;
-    const oidName = oidNameFull.includes("::") ? oidNameFull.split("::")[1] : oidNameFull;
-    const val = rest.split(":").slice(1).join(":").trim();
     const rec = map.get(idx) ?? {};
-    if (oidName.endsWith("ifName")) rec.ifName = val;
-    else if (oidName.endsWith("ifDescr")) rec.ifDescr = val;
-    else if (oidName.endsWith("ifAlias")) rec.ifAlias = val;
-    else if (oidName.endsWith("ifAdminStatus")) rec.adminStatus = val;
-    else if (oidName.endsWith("ifOperStatus")) rec.operStatus = val;
-    else if (oidName.endsWith("ifSpeed")) rec.ifSpeed = Number(val) || null;
-    else if (oidName.endsWith("ifHighSpeed")) rec.ifHighSpeed = Number(val) || null;
-    else if (oidName.endsWith("ifMtu")) rec.ifMtu = Number(val) || null;
-    else if (oidName.endsWith("ifPhysAddress")) rec.ifPhysAddress = val;
+    if (key === "ifName") rec.ifName = val;
+    else if (key === "ifDescr") rec.ifDescr = val;
+    else if (key === "ifAlias") rec.ifAlias = val;
+    else if (key === "adminStatus") rec.adminStatus = val;
+    else if (key === "operStatus") rec.operStatus = val;
+    else if (key === "ifSpeed") rec.ifSpeed = Number(val) || null;
+    else if (key === "ifHighSpeed") rec.ifHighSpeed = Number(val) || null;
+    else if (key === "ifMtu") rec.ifMtu = Number(val) || null;
+    else if (key === "ifPhysAddress") rec.ifPhysAddress = val;
     map.set(idx, rec);
   }
   return Array.from(map.entries()).map(([ifIndex, rec]) => ({
@@ -406,35 +424,33 @@ function parseInterfaces(stdout: string) {
 function parseLldp(stdout: string) {
   const neighbors: any[] = [];
   const lines = stdout.trim().split("\n").filter((l) => l.trim().length);
+  const prefixes = {
+    remoteSysName: "1.0.8802.1.1.2.1.4.1.1.9",
+    remotePortId: "1.0.8802.1.1.2.1.4.1.1.7",
+    remoteChassisId: "1.0.8802.1.1.2.1.4.1.1.5",
+    remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
+    localPort: "1.0.8802.1.1.2.1.3.7.1.3",
+  };
   for (const line of lines) {
     const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
     if (!oidPart || !rest) continue;
-    if (oidPart.includes("lldpRemSysName")) {
-      const key = oidPart.split(".").slice(-2).join(".");
-      const existing = neighbors.find((n) => n.key === key) ?? { key };
-      existing.remoteSysName = rest.split(":").slice(1).join(":").trim();
-      if (!neighbors.includes(existing)) neighbors.push(existing);
-    } else if (oidPart.includes("lldpRemPortId")) {
-      const key = oidPart.split(".").slice(-2).join(".");
-      const existing = neighbors.find((n) => n.key === key) ?? { key };
-      existing.remotePortId = rest.split(":").slice(1).join(":").trim();
-      if (!neighbors.includes(existing)) neighbors.push(existing);
-    } else if (oidPart.includes("lldpRemChassisId")) {
-      const key = oidPart.split(".").slice(-2).join(".");
-      const existing = neighbors.find((n) => n.key === key) ?? { key };
-      existing.remoteChassisId = rest.split(":").slice(1).join(":").trim();
-      if (!neighbors.includes(existing)) neighbors.push(existing);
-    } else if (oidPart.includes("lldpRemManAddrIfSubtype")) {
-      const key = oidPart.split(".").slice(-2).join(".");
-      const existing = neighbors.find((n) => n.key === key) ?? { key };
-      existing.remoteMgmtIp = rest.split(":").slice(1).join(":").trim();
-      if (!neighbors.includes(existing)) neighbors.push(existing);
-    } else if (oidPart.includes("lldpLocPortId")) {
-      const key = oidPart.split(".").slice(-1).join(".");
-      const existing = neighbors.find((n) => n.localPort === key) ?? { key };
-      existing.localPort = rest.split(":").slice(1).join(":").trim();
-      if (!neighbors.includes(existing)) neighbors.push(existing);
+    const oidFull = normalizeOidNumeric(oidPart);
+    const val = rest.split(":").slice(1).join(":").trim();
+    const entry = Object.entries(prefixes).find(([_, prefix]) => oidFull.startsWith(prefix + "."));
+    if (!entry) continue;
+    const [key, prefix] = entry;
+    const suffix = oidFull.slice(prefix.length + 1);
+    const nKey = key === "localPort" ? `loc-${suffix}` : `rem-${suffix}`;
+    let existing = neighbors.find((n) => n.__k === nKey);
+    if (!existing) {
+      existing = { __k: nKey };
+      neighbors.push(existing);
     }
+    if (key === "localPort") existing.localPort = val;
+    else if (key === "remoteSysName") existing.remoteSysName = val;
+    else if (key === "remotePortId") existing.remotePortId = val;
+    else if (key === "remoteChassisId") existing.remoteChassisId = val;
+    else if (key === "remoteMgmtIp") existing.remoteMgmtIp = val;
   }
   return neighbors.map((n) => ({
     localPort: n.localPort ?? null,
@@ -443,6 +459,10 @@ function parseLldp(stdout: string) {
     remoteChassisId: n.remoteChassisId ?? null,
     remoteMgmtIp: n.remoteMgmtIp ?? null,
   }));
+}
+
+function normalizeOidNumeric(oidPart: string): string {
+  return oidPart.replace(/^iso\\./i, "").replace(/^\\./, "").replace(/^SNMPv2-SMI::/, "");
 }
 
 async function runWithConcurrency(tasks: Array<() => Promise<void>>, limit: number, shuttingDown: { flag: boolean }) {
