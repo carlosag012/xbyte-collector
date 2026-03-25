@@ -453,7 +453,16 @@ function parseLldp(outputs: Record<string, string>) {
       const oidFull = normalizeOidNumeric(oidPart);
       if (!oidFull.startsWith(prefix + ".")) continue;
       const suffix = oidFull.slice(prefix.length + 1);
-      const val = snmpValueToString(rest);
+      let val: string | null = snmpValueToString(rest);
+      if (key === "remoteMgmtIp") {
+        const parts = suffix.split(".");
+        const addrOctets = parts.slice(-4).map((p) => Number(p));
+        if (addrOctets.length === 4 && addrOctets.every((n) => Number.isFinite(n))) {
+          val = addrOctets.join(".");
+        } else {
+          val = null;
+        }
+      }
       if (sink === localPorts) {
         sink.set(suffix, val);
       } else {
