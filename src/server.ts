@@ -61,6 +61,8 @@ import {
   getDeviceById,
   getPollProfileById,
   getPollJobDetail,
+  enqueuePollJobForTarget,
+  enqueuePollJobsForTargets,
   getRunningPollJobDetailForLeaseOwner,
   getRunningPollJobForLeaseOwner,
   getSystemSnapshotsForDevice,
@@ -528,7 +530,12 @@ const server = createServer((req, res) => {
           });
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true, device }));
-        } catch {
+        } catch (err: any) {
+          if (err?.message === "device_ip_exists") {
+            res.writeHead(400);
+            res.end(JSON.stringify({ ok: false, error: "device_ip_exists" }));
+            return;
+          }
           res.writeHead(500);
           res.end(JSON.stringify({ ok: false, error: "db_error" }));
         }
@@ -563,11 +570,16 @@ const server = createServer((req, res) => {
           typeof body.name !== "string" ||
           !body.name ||
           !Number.isFinite(body.intervalSec) ||
+          body.intervalSec <= 0 ||
+          !Number.isInteger(Number(body.intervalSec)) ||
           !Number.isFinite(body.timeoutMs) ||
-          !Number.isFinite(body.retries)
+          body.timeoutMs <= 0 ||
+          !Number.isFinite(body.retries) ||
+          Number(body.retries) < 0 ||
+          !Number.isInteger(Number(body.retries))
         ) {
           res.writeHead(400);
-          res.end(JSON.stringify({ ok: false, error: "invalid_profile_payload" }));
+          res.end(JSON.stringify({ ok: false, error: "invalid_poll_profile_payload" }));
           return;
         }
         try {
@@ -997,10 +1009,23 @@ const server = createServer((req, res) => {
     return;
   }
 
-  if (method === "GET" && url === "/api/poll-targets") {
+  if (method === "GET" && url.startsWith("/api/poll-targets")) {
     try {
       if (!db) throw new Error("db missing");
-      const targets = listPollTargets(db);
+      const parsed = new URL(req.url ?? "/api/poll-targets", "http://localhost");
+      const deviceIdStr = parsed.searchParams.get("deviceId");
+      const profileIdStr = parsed.searchParams.get("profileId");
+      const deviceId = deviceIdStr ? Number(deviceIdStr) : undefined;
+      const profileId = profileIdStr ? Number(profileIdStr) : undefined;
+      if (
+        (deviceIdStr && (!Number.isFinite(deviceId) || deviceId! <= 0 || !Number.isInteger(deviceId!))) ||
+        (profileIdStr && (!Number.isFinite(profileId) || profileId! <= 0 || !Number.isInteger(profileId!)))
+      ) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_poll_target_query" }));
+        return;
+      }
+      const targets = listPollTargets(db, { deviceId, profileId });
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true, targets }));
     } catch {
@@ -1016,23 +1041,27 @@ const server = createServer((req, res) => {
         if (
           !body ||
           !Number.isFinite(body.deviceId) ||
-          !Number.isFinite(body.profileId)
+          !Number.isFinite(body.profileId) ||
+          !Number.isInteger(Number(body.deviceId)) ||
+          !Number.isInteger(Number(body.profileId)) ||
+          body.deviceId <= 0 ||
+          body.profileId <= 0
         ) {
           res.writeHead(400);
-          res.end(JSON.stringify({ ok: false, error: "invalid_target_payload" }));
+          res.end(JSON.stringify({ ok: false, error: "invalid_poll_target_payload" }));
           return;
         }
         try {
           if (!db) throw new Error("db missing");
           const device = getDeviceById(db, Number(body.deviceId));
           if (!device) {
-            res.writeHead(400);
+            res.writeHead(404);
             res.end(JSON.stringify({ ok: false, error: "device_not_found" }));
             return;
           }
           const profile = getPollProfileById(db, Number(body.profileId));
           if (!profile) {
-            res.writeHead(400);
+            res.writeHead(404);
             res.end(JSON.stringify({ ok: false, error: "profile_not_found" }));
             return;
           }
@@ -1090,14 +1119,14 @@ const server = createServer((req, res) => {
 
           // Single-target enqueue
           if (body && body.targetId !== undefined) {
-            if (!Number.isFinite(body.targetId)) {
+            if (!Number.isFinite(body.targetId) || !Number.isInteger(Number(body.targetId)) || Number(body.targetId) <= 0) {
               res.writeHead(400);
-              res.end(JSON.stringify({ ok: false, error: "invalid_target_id" }));
+              res.end(JSON.stringify({ ok: false, error: "invalid_enqueue_payload" }));
               return;
             }
             const target = getPollTargetById(db, Number(body.targetId));
             if (!target) {
-              res.writeHead(400);
+              res.writeHead(404);
               res.end(JSON.stringify({ ok: false, error: "target_not_found" }));
               return;
             }
@@ -1106,15 +1135,59 @@ const server = createServer((req, res) => {
               res.end(JSON.stringify({ ok: false, error: "target_disabled" }));
               return;
             }
-            const job = createPollJob(db, { targetId: target.id });
+            const job = enqueuePollJobForTarget(db, target.id);
             res.writeHead(200);
-            res.end(JSON.stringify({ ok: true, jobs: [job] }));
+            res.end(JSON.stringify({ ok: true, job }));
             return;
           }
 
           // Enqueue for all enabled targets
           const enabledTargets = listEnabledPollTargets(db);
           const jobs = enabledTargets.map((t) => createPollJob(db, { targetId: t.id }));
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, jobs }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/poll-jobs/enqueue-bulk") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        try {
+          if (!db) throw new Error("db missing");
+          if (!body || !Array.isArray(body.targetIds) || !body.targetIds.length) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ ok: false, error: "invalid_bulk_enqueue_payload" }));
+            return;
+          }
+          const ids = body.targetIds.map((n: any) => Number(n)).filter((n: number) => Number.isFinite(n) && n > 0 && Number.isInteger(n));
+          if (ids.length !== body.targetIds.length) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ ok: false, error: "invalid_bulk_enqueue_payload" }));
+            return;
+          }
+          for (const id of ids) {
+            const target = getPollTargetById(db, id);
+            if (!target) {
+              res.writeHead(404);
+              res.end(JSON.stringify({ ok: false, error: "target_not_found" }));
+              return;
+            }
+            if (!target.enabled) {
+              res.writeHead(400);
+              res.end(JSON.stringify({ ok: false, error: "target_disabled" }));
+              return;
+            }
+          }
+          const jobs = enqueuePollJobsForTargets(db, ids);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true, jobs }));
         } catch {

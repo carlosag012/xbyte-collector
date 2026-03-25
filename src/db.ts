@@ -472,6 +472,13 @@ export function listDevices(db: DB): DeviceRow[] {
 export function createDevice(db: DB, input: { hostname: string; ipAddress: string; enabled?: boolean; site?: string; org?: string }): DeviceRow {
   const now = new Date().toISOString();
   const enabled = input.enabled ?? true;
+  const dup = db
+    .prepare(`SELECT id FROM devices WHERE ip_address = ? LIMIT 1`)
+    .get(input.ipAddress) as { id: number } | undefined;
+  if (dup) {
+    const err = new Error("device_ip_exists");
+    throw err;
+  }
   const result = db
     .prepare(
       `INSERT INTO devices (hostname, ip_address, enabled, site, org, created_at, updated_at)
@@ -1266,14 +1273,25 @@ export type PollTargetRow = {
   updatedAt: string;
 };
 
-export function listPollTargets(db: DB): PollTargetRow[] {
+export function listPollTargets(db: DB, input?: { deviceId?: number; profileId?: number }): PollTargetRow[] {
+  const conditions: string[] = [];
+  const params: any[] = [];
+  if (input?.deviceId !== undefined) {
+    conditions.push("device_id = ?");
+    params.push(input.deviceId);
+  }
+  if (input?.profileId !== undefined) {
+    conditions.push("profile_id = ?");
+    params.push(input.profileId);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const rows = db
     .prepare(
       `SELECT id, device_id as deviceId, profile_id as profileId, enabled,
               created_at as createdAt, updated_at as updatedAt
-       FROM poll_targets ORDER BY id`
+       FROM poll_targets ${where} ORDER BY id`
     )
-    .all() as Array<{
+    .all(...params) as Array<{
     id: number;
     deviceId: number;
     profileId: number;
@@ -1340,6 +1358,17 @@ export function createPollTarget(db: DB, input: { deviceId: number; profileId: n
     createdAt: now,
     updatedAt: now,
   };
+}
+
+export function enqueuePollJobForTarget(db: DB, targetId: number): PollJobRow {
+  const target = getPollTargetById(db, targetId);
+  if (!target) throw new Error("target_not_found");
+  return createPollJob(db, { targetId });
+}
+
+export function enqueuePollJobsForTargets(db: DB, targetIds: number[]): PollJobRow[] {
+  const tx = db.transaction((ids: number[]) => ids.map((id) => enqueuePollJobForTarget(db, id)));
+  return tx(targetIds);
 }
 
 export type PollJobRow = {
