@@ -223,9 +223,9 @@ export default function ProfilesPage() {
             header: "Actions",
             render: (p: Profile) => (
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn-collector" onClick={() => setEditing(p)}><span className="btn-collector-label">Edit</span></button>
-                <button className="btn-collector" onClick={() => toggle(p)}><span className="btn-collector-label">{p.enabled ? "Disable" : "Enable"}</span></button>
-                <button className="btn-collector" onClick={() => openHistory(p)}><span className="btn-collector-label">History</span></button>
+                <button className="btn-secondary" onClick={() => setEditing(p)}>Edit</button>
+                <button className="btn-secondary" onClick={() => toggle(p)}>{p.enabled ? "Disable" : "Enable"}</button>
+                <button className="btn-secondary" onClick={() => openHistory(p)}>History</button>
               </div>
             ),
           },

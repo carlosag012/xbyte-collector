@@ -163,9 +163,7 @@ export default function JobsPage() {
             header: "Actions",
             render: (j: Job) => (
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn-collector" onClick={() => setSelectedJob(j)}>
-                  <span className="btn-collector-label">Detail</span>
-                </button>
+                <button className="btn-secondary" onClick={() => setSelectedJob(j)}>Detail</button>
               </div>
             ),
           },

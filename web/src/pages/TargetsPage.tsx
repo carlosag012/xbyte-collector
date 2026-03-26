@@ -122,7 +122,7 @@ export default function TargetsPage() {
 
       <div className="cards" style={{ marginBottom: 16 }}>
         <Card title="Create Target">
-          <form onSubmit={createTarget} className="form-grid">
+          <form onSubmit={createTarget} className="form-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
             <label>
               <span>Device</span>
               <select value={form.deviceId} onChange={(e) => setForm((f) => ({ ...f, deviceId: e.target.value ? Number(e.target.value) : "" }))}>
@@ -150,7 +150,7 @@ export default function TargetsPage() {
               </select>
               <small style={{ color: "var(--muted)" }}>Pick a ping or SNMP profile appropriate for this device.</small>
               </label>
-              <button type="submit" className="btn-collector"><span className="btn-collector-label">Create Target</span></button>
+              <button type="submit" className="btn-collector" style={{ width: "100%" }}><span className="btn-collector-label">Create Target</span></button>
               <small style={{ color: "var(--muted)" }}>
                 After creation: enqueue a poll to verify connectivity. Use Jobs/Logs for troubleshooting.
               </small>
@@ -175,9 +175,9 @@ export default function TargetsPage() {
             header: "Actions",
             render: (t: Target) => (
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn-collector" onClick={() => toggle(t)}><span className="btn-collector-label">{t.enabled ? "Disable" : "Enable"}</span></button>
-                <button className="btn-collector" onClick={() => enqueue(t)}><span className="btn-collector-label">Enqueue</span></button>
-                <button className="btn-collector" onClick={() => openHistory(t)}><span className="btn-collector-label">History</span></button>
+                <button className="btn-secondary" onClick={() => toggle(t)}>{t.enabled ? "Disable" : "Enable"}</button>
+                <button className="btn-secondary" onClick={() => enqueue(t)}>Enqueue</button>
+                <button className="btn-secondary" onClick={() => openHistory(t)}>History</button>
               </div>
             ),
           },

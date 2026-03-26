@@ -171,17 +171,22 @@ export default function NeighborsPage() {
             header: "Actions",
             render: (n: Neighbor) => (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <button className="btn-collector" onClick={() => openPromote(n)}><span className="btn-collector-label">Promote</span></button>
-                <button className="btn-collector" onClick={() => setLinkNeighbor(n)}><span className="btn-collector-label">Link</span></button>
+                <button
+                  className={(n.reviewStatus ?? "new") === "new" ? "btn-collector" : "btn-secondary"}
+                  onClick={() => openPromote(n)}
+                >
+                  {(n.reviewStatus ?? "new") === "new" ? <span className="btn-collector-label">Promote</span> : "Promote"}
+                </button>
+                <button className="btn-secondary" onClick={() => setLinkNeighbor(n)}>Link</button>
                 {(n.promotedDeviceId || n.linkedDeviceId) && (
                   <span style={{ color: "var(--muted)", fontSize: 12 }}>
                     {n.promotedDeviceId ? `→ device ${n.promotedDeviceId}` : `→ device ${n.linkedDeviceId}`}
                   </span>
                 )}
                 {n.reviewStatus === "ignored" ? (
-                  <button className="btn-collector" onClick={() => unignore(n)}><span className="btn-collector-label">Unignore</span></button>
+                  <button className="btn-secondary" onClick={() => unignore(n)}>Unignore</button>
                 ) : (
-                  <button className="btn-collector" onClick={() => setIgnoreNeighbor(n)}><span className="btn-collector-label">Ignore</span></button>
+                  <button className="btn-secondary" onClick={() => setIgnoreNeighbor(n)}>Ignore</button>
                 )}
               </div>
             ),

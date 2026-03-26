@@ -277,9 +277,10 @@ textarea {
   border-radius: 0;
   border: 0;
   border-bottom: 3px solid var(--border);
-  background: transparent;
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text);
   outline: none;
+  min-width: 0;
 }
 
 input:focus,
@@ -289,6 +290,15 @@ textarea:focus {
   border-bottom: 3px solid #7c3aed;
   outline: none;
   box-shadow: none;
+}
+
+select {
+  background: #0f172a;
+  color: #f8fafc;
+}
+select option {
+  background: #0f172a;
+  color: #f8fafc;
 }
 
 .form-inline-gap > *:not(:last-child) {
@@ -340,6 +350,21 @@ button {
     border-color 0.15s ease;
 }
 .btn-topbar:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+
+.btn-secondary {
+  background: transparent;
+  color: #ffffff;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.btn-secondary:hover {
   background: rgba(255, 255, 255, 0.08);
   border-color: rgba(255, 255, 255, 0.28);
 }

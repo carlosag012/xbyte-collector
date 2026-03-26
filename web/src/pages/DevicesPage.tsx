@@ -216,14 +216,7 @@ export default function DevicesPage() {
       <PageHeader
         title="Devices"
         subtitle="Manage monitored devices, view discovery data, and launch polls."
-        action={
-          <input
-            placeholder="Search hostname or IP"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            style={{ width: 220 }}
-          />
-        }
+        action={<input placeholder="Search hostname or IP" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 220 }} />}
       />
 
       <div className="cards" style={{ marginBottom: 16 }}>
@@ -247,17 +240,15 @@ export default function DevicesPage() {
             </label>
             <div style={{ display: "flex", gap: 8, flexDirection: "column" }}>
               <button type="submit" className="btn-collector" style={{ width: "100%" }}>
-                <span className="btn-collector-label">{editing ? "Update" : "Create Device"}</span>
+                - <span className="btn-collector-label">{editing ? "Update" : "Create Device"}</span>
               </button>
               {editing && (
-                <button type="button" className="btn-collector" onClick={() => setEditing(null)}>
-                  <span className="btn-collector-label">Cancel</span>
+                <button type="button" className="btn-secondary" onClick={() => setEditing(null)}>
+                  Cancel
                 </button>
               )}
             </div>
-            <small style={{ color: "var(--muted)" }}>
-              Next step: attach a poll profile to this device and enqueue a first poll.
-            </small>
+            <small style={{ color: "var(--muted)" }}>Next step: attach a poll profile to this device and enqueue a first poll.</small>
             {formError && <p style={{ color: "#f87171", margin: "6px 0 0 0" }}>{formError}</p>}
           </form>
         </Card>
@@ -284,9 +275,15 @@ export default function DevicesPage() {
             header: "Actions",
             render: (d: Device) => (
               <div style={{ display: "flex", gap: 8 }}>
-                <button className="btn-collector" onClick={() => selectDevice(d.id)}><span className="btn-collector-label">View</span></button>
-                <button className="btn-collector" onClick={() => startEdit(d)}><span className="btn-collector-label">Edit</span></button>
-                <button className="btn-collector" onClick={() => toggleEnabled(d)}><span className="btn-collector-label">{d.enabled ? "Disable" : "Enable"}</span></button>
+                <button className="btn-secondary" onClick={() => selectDevice(d.id)}>
+                  View
+                </button>
+                <button className="btn-secondary" onClick={() => startEdit(d)}>
+                  Edit
+                </button>
+                <button className="btn-secondary" onClick={() => toggleEnabled(d)}>
+                  {d.enabled ? "Disable" : "Enable"}
+                </button>
               </div>
             ),
           },
@@ -303,27 +300,19 @@ export default function DevicesPage() {
             <p style={{ margin: 0, color: "var(--muted)" }}>Org: {detailDevice.org ?? "—"}</p>
             {promotionNote && <p style={{ margin: "6px 0 0 0", color: "#a855f7" }}>{promotionNote}</p>}
             <p style={{ margin: "8px 0 0 0" }}>
-              System: {snapshot?.sys_name ?? "—"} | {snapshot?.sys_descr ?? ""} | {snapshot?.sys_object_id ?? ""} |{" "}
-              {snapshot?.sys_uptime ?? ""}
+              System: {snapshot?.sys_name ?? "—"} | {snapshot?.sys_descr ?? ""} | {snapshot?.sys_object_id ?? ""} | {snapshot?.sys_uptime ?? ""}
             </p>
             <p style={{ margin: "8px 0 0 0" }}>
-              Readiness:{" "}
-              <Pill
-                status={
-                  detailTargets.length > 0
-                    ? "ready"
-                    : promotionNote
-                    ? "needs target"
-                    : "needs profile"
-                }
-              />{" "}
+              Readiness: <Pill status={detailTargets.length > 0 ? "ready" : promotionNote ? "needs target" : "needs profile"} />{" "}
               {detailTargets.length === 0 ? "Attach a profile/target to begin polling." : "Targets attached; enqueue a poll to collect."}
             </p>
           </Card>
           {history.length > 0 && (
             <Card title="History">
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <button className="btn-collector" onClick={() => setHistoryModal(true)}><span className="btn-collector-label">View change history</span></button>
+                <button className="btn-secondary" onClick={() => setHistoryModal(true)}>
+                  View change history
+                </button>
               </div>
             </Card>
           )}
@@ -371,7 +360,7 @@ export default function DevicesPage() {
                     ))}
                 </select>
               </label>
-              <button type="button" onClick={attachTarget} disabled={!attachProfileId}>
+              <button type="button" className="btn-secondary" onClick={attachTarget} disabled={!attachProfileId}>
                 Attach Target
               </button>
               <label>
@@ -385,7 +374,7 @@ export default function DevicesPage() {
                   ))}
                 </select>
               </label>
-              <button type="button" onClick={enqueueJob} disabled={!enqueueTargetId}>
+              <button type="button" className="btn-secondary" onClick={enqueueJob} disabled={!enqueueTargetId}>
                 Enqueue Poll
               </button>
             </div>
