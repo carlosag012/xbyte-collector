@@ -7,12 +7,13 @@ import {
   initDatabase,
   upsertWorkerRegistration,
   heartbeatWorkerRegistration,
-  claimNextPendingPollJobForWorkerCapabilities,
+  claimPendingPollJobsBatch,
   finishPollJob,
   abandonPollJob,
   unclaimPollJobById,
   getWorkerRegistrationByName,
-  getRunningPollJobDetailForLeaseOwner,
+  getPollJobDetail,
+  licenseAllowsCollection,
   type DB,
 } from "./db.js";
 
@@ -21,6 +22,8 @@ type WorkerConfig = {
   heartbeatMs: number;
   loopMs: number;
   stubDelayMs: number;
+  batchSize: number;
+  fpingPath: string;
 };
 
 function buildWorkerConfig(): WorkerConfig {
@@ -30,6 +33,8 @@ function buildWorkerConfig(): WorkerConfig {
     heartbeatMs: cfg.pingWorkerHeartbeatMs ?? 15_000,
     loopMs: cfg.pingWorkerLoopMs ?? 5_000,
     stubDelayMs: cfg.pingWorkerStubDelayMs ?? 250,
+    batchSize: cfg.pingWorkerBatchSize ?? 200,
+    fpingPath: cfg.pingWorkerFpingPath ?? "fping",
   };
 }
 
@@ -44,33 +49,34 @@ function log(data: Record<string, any>) {
 }
 
 async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: boolean }) {
-  let currentJobId: number | null = null;
+  let currentJobIds = new Set<number>();
   let heartbeatHandle: NodeJS.Timeout | null = null;
 
   async function releaseInFlight(reason: string) {
-    if (currentJobId === null) return;
-    try {
-      const released = unclaimPollJobById(db, { jobId: currentJobId, leaseOwner: workerCfg.workerName });
-      log({
-        level: "info",
-        msg: "released in-flight job on shutdown",
-        jobId: currentJobId,
-        released: Boolean(released),
-        reason,
-        workerName: workerCfg.workerName,
-      });
-    } catch (err: any) {
-      log({
-        level: "error",
-        msg: "failed to release in-flight job on shutdown",
-        jobId: currentJobId,
-        reason,
-        error: err?.message ?? String(err),
-        workerName: workerCfg.workerName,
-      });
-    } finally {
-      currentJobId = null;
+    if (!currentJobIds.size) return;
+    for (const jobId of Array.from(currentJobIds)) {
+      try {
+        const released = unclaimPollJobById(db, { jobId, leaseOwner: workerCfg.workerName });
+        log({
+          level: "info",
+          msg: "released in-flight job on shutdown",
+          jobId,
+          released: Boolean(released),
+          reason,
+          workerName: workerCfg.workerName,
+        });
+      } catch (err: any) {
+        log({
+          level: "error",
+          msg: "failed to release in-flight job on shutdown",
+          jobId,
+          reason,
+          error: err?.message ?? String(err),
+          workerName: workerCfg.workerName,
+        });
+      }
     }
+    currentJobIds.clear();
   }
 
   // register once on start
@@ -102,73 +108,121 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
         await delay(workerCfg.loopMs);
         continue;
       }
-      const job = claimNextPendingPollJobForWorkerCapabilities(db, {
+      const jobs = claimPendingPollJobsBatch(db, {
         workerName: workerCfg.workerName,
         supportedKinds: ["ping"],
+        limit: workerCfg.batchSize,
       });
 
-      if (!job) {
+      if (!jobs.length) {
         await delay(workerCfg.loopMs);
         continue;
       }
+      currentJobIds = new Set(jobs.map((j) => j.id));
 
-      currentJobId = job.id;
-      const detail = getRunningPollJobDetailForLeaseOwner(db, workerCfg.workerName);
+      log({ level: "info", msg: "batch claimed", workerName: workerCfg.workerName, count: jobs.length });
 
-      if (!detail) {
-        abandonPollJob(db, {
-          jobId: job.id,
-          leaseOwner: workerCfg.workerName,
-          result: {
-            stub: true,
-            workerType: "ping",
-            error: "missing_context_after_claim",
-            failedAt: new Date().toISOString(),
-          },
+      const details = await Promise.all(
+        jobs.map(async (job) => {
+          const detail = getPollJobDetail(db, job.id);
+          return { job, detail };
+        })
+      );
+
+      const validDetails = details.filter((d) => d.detail) as Array<{ job: any; detail: any }>;
+      const timeoutMs =
+        validDetails.length > 0
+          ? Math.max(
+              ...validDetails.map((d) =>
+                typeof d.detail.profile.timeoutMs === "number" ? d.detail.profile.timeoutMs : 2000
+              )
+            )
+          : 2000;
+
+      const lic = licenseAllowsCollection(db);
+      if (!lic.allowed) {
+        let blockedCount = 0;
+        for (const { job, detail } of validDetails) {
+          finishPollJob(db, {
+            jobId: job.id,
+            status: "failed",
+            result: {
+              workerType: "ping",
+              success: false,
+              blockedByLicense: true,
+              code: lic.reason ?? "license_required",
+              effectiveStatus: lic.effectiveStatus,
+              message: `Collection blocked: ${lic.reason ?? "license_required"}`,
+              processedAt: new Date().toISOString(),
+              context: {
+                jobId: detail.job.id,
+                targetId: detail.target.id,
+                deviceId: detail.device.id,
+                deviceHostname: detail.device.hostname,
+                deviceIpAddress: detail.device.ipAddress,
+                profileId: detail.profile.id,
+                profileKind: detail.profile.kind,
+              },
+            },
+          });
+          currentJobIds.delete(job.id);
+          blockedCount++;
+        }
+        log({
+          level: "warn",
+          msg: "batch blocked by license",
+          workerName: workerCfg.workerName,
+          effectiveStatus: lic.effectiveStatus,
+          reason: lic.reason,
+          blocked: blockedCount,
+          claimed: jobs.length,
         });
-        currentJobId = null;
-        await delay(workerCfg.loopMs);
+        // abandon invalids as usual
+        const invalids = details.filter((d) => !d.detail);
+        for (const { job } of invalids) {
+          abandonPollJob(db, {
+            jobId: job.id,
+            leaseOwner: workerCfg.workerName,
+            result: {
+              stub: true,
+              workerType: "ping",
+              error: "missing_context_after_claim",
+              failedAt: new Date().toISOString(),
+            },
+          });
+          currentJobIds.delete(job.id);
+        }
         continue;
       }
+
+      const targets = validDetails.map((d) => ({ jobId: d.job.id, ip: d.detail.device.ipAddress }));
 
       log({
         level: "info",
-        msg: "claimed job",
-        jobId: job.id,
-        targetId: job.targetId,
-        deviceId: detail.device.id,
-        deviceHostname: detail.device.hostname,
-        profileKind: detail.profile.kind,
+        msg: "fping batch start",
         workerName: workerCfg.workerName,
+        count: targets.length,
+        timeoutMs,
       });
 
-      try {
-        await delay(workerCfg.stubDelayMs);
-        if (shuttingDown.flag) {
-          await releaseInFlight("shutdown_during_processing");
-          break;
-        }
-        const probeTarget = detail.device.ipAddress;
-        const timeoutMs = typeof detail.profile.timeoutMs === "number" ? detail.profile.timeoutMs : 2000;
+      const probeResults = await runPingBatch(targets, workerCfg.fpingPath, timeoutMs);
 
-        log({
-          level: "info",
-          msg: "ping probe start",
-          jobId: job.id,
-          deviceHostname: detail.device.hostname,
-          deviceIpAddress: probeTarget,
-          workerName: workerCfg.workerName,
-        });
+      let successCount = 0;
+      let failCount = 0;
 
-        const { success, latencyMs, error } = await runPingProbe(probeTarget, timeoutMs);
+      for (const { job, detail } of validDetails) {
+        const probe = probeResults.get(detail.device.ipAddress);
+        const success = probe?.success === true;
         const status = success ? "completed" : "failed";
+        if (success) successCount++;
+        else failCount++;
         const resultPayload = {
           stub: false,
           workerType: "ping",
           success,
-          target: probeTarget,
-          latencyMs: latencyMs ?? null,
-          error: success ? undefined : error ?? "unreachable",
+          target: detail.device.ipAddress,
+          latencyMs: probe?.latencyMs ?? null,
+          error: success ? undefined : probe?.error ?? "unreachable",
           processedAt: new Date().toISOString(),
           context: {
             jobId: detail.job.id,
@@ -180,46 +234,39 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
             profileKind: detail.profile.kind,
           },
         };
-
-        const finished = finishPollJob(db, {
+        finishPollJob(db, {
           jobId: job.id,
           status,
           result: resultPayload,
         });
+        currentJobIds.delete(job.id);
+      }
 
-        if (finished && !shuttingDown.flag) {
-          log({
-            level: success ? "info" : "warn",
-            msg: success ? "ping probe success" : "ping probe failed",
-            jobId: finished.id,
-            status: finished.status,
-            latencyMs: latencyMs ?? null,
-            error: success ? undefined : error ?? "unreachable",
-            workerName: workerCfg.workerName,
-          });
-        }
-        currentJobId = null;
-      } catch (err: any) {
-        const abandoned = abandonPollJob(db, {
+      const invalids = details.filter((d) => !d.detail);
+      for (const { job } of invalids) {
+        abandonPollJob(db, {
           jobId: job.id,
           leaseOwner: workerCfg.workerName,
           result: {
             stub: true,
             workerType: "ping",
-            error: err?.message ?? String(err),
+            error: "missing_context_after_claim",
             failedAt: new Date().toISOString(),
           },
         });
-        log({
-          level: "error",
-          msg: "job abandon due to error",
-          jobId: job.id,
-          status: abandoned?.status ?? "failed",
-          workerName: workerCfg.workerName,
-          error: err?.message ?? String(err),
-        });
-        currentJobId = null;
+        currentJobIds.delete(job.id);
+        failCount++;
       }
+
+      log({
+        level: "info",
+        msg: "fping batch complete",
+        workerName: workerCfg.workerName,
+        claimed: jobs.length,
+        succeeded: successCount,
+        failed: failCount,
+        timeoutMs,
+      });
     } catch (err: any) {
       log({ level: "error", msg: "loop exception", error: err?.message ?? String(err), workerName: workerCfg.workerName });
       await delay(workerCfg.loopMs);
@@ -260,17 +307,46 @@ main().catch((err) => {
   process.exit(1);
 });
 
-async function runPingProbe(target: string, timeoutMs: number): Promise<{ success: boolean; latencyMs: number | null; error?: string }> {
-  const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
-  const args = ["-n", "-c", "1", "-W", timeoutSec.toString(), target];
-  const start = Date.now();
+async function runPingBatch(
+  targets: Array<{ jobId: number; ip: string }>,
+  fpingPath: string,
+  timeoutMs: number
+): Promise<Map<string, { success: boolean; latencyMs: number | null; error?: string }>> {
+  const result = new Map<string, { success: boolean; latencyMs: number | null; error?: string }>();
+  if (!targets.length) return result;
+  const args = ["-a", "-C", "1", "-t", timeoutMs.toString(), ...targets.map((t) => t.ip)];
   try {
-    const { stdout } = await execFileAsync("ping", args, { timeout: timeoutMs + 500, encoding: "utf8" });
-    const latencyMatch = stdout.match(/time[=<]([0-9.]+)\s*ms/i);
-    const latencyMs = latencyMatch ? Number(latencyMatch[1]) : Date.now() - start;
-    return { success: true, latencyMs };
+    const { stdout } = await execFileAsync(fpingPath, args, { timeout: timeoutMs + 1000, encoding: "utf8" });
+    parseFpingOutput(stdout, result);
   } catch (err: any) {
-    const latencyMs = Date.now() - start;
-    return { success: false, latencyMs, error: err?.message ?? "ping_failed" };
+    const stdout = err?.stdout as string | undefined;
+    if (stdout) {
+      parseFpingOutput(stdout, result);
+    }
+    for (const t of targets) {
+      if (!result.has(t.ip)) {
+        result.set(t.ip, { success: false, latencyMs: null, error: err?.message ?? "fping_failed" });
+      }
+    }
+    return result;
+  }
+  for (const t of targets) {
+    if (!result.has(t.ip)) {
+      result.set(t.ip, { success: false, latencyMs: null, error: "no_reply" });
+    }
+  }
+  return result;
+}
+
+function parseFpingOutput(
+  stdout: string,
+  result: Map<string, { success: boolean; latencyMs: number | null; error?: string }>
+) {
+  const lines = stdout.trim().split("\n").filter((l) => l.trim().length);
+  for (const line of lines) {
+    const [ip, rest] = line.split(" : ").map((s) => s.trim());
+    const latencyPart = rest?.split(" ").find((p) => p.length);
+    const latencyMs = latencyPart && latencyPart !== "-" ? Number(latencyPart) : null;
+    result.set(ip, { success: latencyMs !== null, latencyMs, error: latencyMs === null ? "timeout" : undefined });
   }
 }

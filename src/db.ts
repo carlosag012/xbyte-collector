@@ -160,6 +160,48 @@ export function initDatabase(config: AppConfig): DB {
       collected_at TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS neighbor_reviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      neighbor_id INTEGER NOT NULL UNIQUE,
+      status TEXT NOT NULL DEFAULT 'new',
+      linked_device_id INTEGER,
+      promoted_device_id INTEGER,
+      note TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS neighbor_review_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      neighbor_id INTEGER NOT NULL,
+      action TEXT NOT NULL,
+      actor TEXT,
+      device_id INTEGER,
+      note TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS admin_audit_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type TEXT NOT NULL,
+      entity_id INTEGER,
+      action TEXT NOT NULL,
+      actor TEXT,
+      note TEXT,
+      before_json TEXT,
+      after_json TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS license_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      status TEXT NOT NULL,
+      subscription_status TEXT NOT NULL,
+      license_key TEXT,
+      customer TEXT,
+      validated_at TEXT,
+      expires_at TEXT,
+      last_error TEXT,
+      updated_at TEXT NOT NULL
+    );
+    INSERT OR IGNORE INTO license_state (id, status, subscription_status, updated_at) VALUES (1, 'unlicensed', 'inactive', CURRENT_TIMESTAMP);
     CREATE TABLE IF NOT EXISTS discovered_device_candidates (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       source_device_id INTEGER NOT NULL,
@@ -469,6 +511,37 @@ export function listDevices(db: DB): DeviceRow[] {
   return rows.map((r) => ({ ...r, enabled: Boolean(r.enabled) }));
 }
 
+export function findDeviceByIpOrHostname(db: DB, input: { ipAddress?: string; hostname?: string }): DeviceRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, hostname, ip_address as ipAddress, enabled, site, org, created_at as createdAt, updated_at as updatedAt
+       FROM devices
+       WHERE (${input.ipAddress ? "ip_address = ?" : "0"}) OR (${input.hostname ? "hostname = ?" : "0"})
+       ORDER BY id LIMIT 1`
+    )
+    .get(
+      ...(input.ipAddress && input.hostname
+        ? [input.ipAddress, input.hostname]
+        : input.ipAddress
+        ? [input.ipAddress]
+        : input.hostname
+        ? [input.hostname]
+        : [])
+    ) as
+    | {
+        id: number;
+        hostname: string;
+        ipAddress: string;
+        enabled: number;
+        site: string | null;
+        org: string | null;
+        createdAt: string;
+        updatedAt: string;
+      }
+    | undefined;
+  return row ? { ...row, enabled: Boolean(row.enabled) } : null;
+}
+
 export function createDevice(db: DB, input: { hostname: string; ipAddress: string; enabled?: boolean; site?: string; org?: string }): DeviceRow {
   const now = new Date().toISOString();
   const enabled = input.enabled ?? true;
@@ -517,6 +590,28 @@ export function getDeviceById(db: DB, id: number): DeviceRow | null {
     | undefined;
   if (!row) return null;
   return { ...row, enabled: Boolean(row.enabled) };
+}
+
+export function updateDevice(
+  db: DB,
+  input: { id: number; hostname?: string; ipAddress?: string; enabled?: boolean; site?: string | null; org?: string | null }
+): DeviceRow | null {
+  const existing = getDeviceById(db, input.id);
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  const next = {
+    hostname: input.hostname ?? existing.hostname,
+    ipAddress: input.ipAddress ?? existing.ipAddress,
+    enabled: input.enabled ?? existing.enabled,
+    site: input.site === undefined ? existing.site : input.site,
+    org: input.org === undefined ? existing.org : input.org,
+  };
+  db.prepare(
+    `UPDATE devices
+     SET hostname = ?, ip_address = ?, enabled = ?, site = ?, org = ?, updated_at = ?
+     WHERE id = ?`
+  ).run(next.hostname, next.ipAddress, next.enabled ? 1 : 0, next.site, next.org, now, input.id);
+  return getDeviceById(db, input.id);
 }
 
 export type PollProfileRow = {
@@ -617,6 +712,77 @@ export function getPollProfileById(db: DB, id: number): PollProfileRow | null {
     enabled: Boolean(row.enabled),
     config: safeParseJson(row.configJson),
   };
+}
+
+export function findPollProfileByNameAndKind(db: DB, input: { name: string; kind: string }): PollProfileRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, kind, name, interval_sec as intervalSec, timeout_ms as timeoutMs, retries, enabled,
+              config_json as configJson, created_at as createdAt, updated_at as updatedAt
+       FROM poll_profiles
+       WHERE kind = ? AND name = ?
+       LIMIT 1`
+    )
+    .get(input.kind, input.name) as
+    | {
+        id: number;
+        kind: string;
+        name: string;
+        intervalSec: number;
+        timeoutMs: number;
+        retries: number;
+        enabled: number;
+        configJson: string;
+        createdAt: string;
+        updatedAt: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    ...row,
+    enabled: Boolean(row.enabled),
+    config: safeParseJson(row.configJson),
+  };
+}
+
+export function updatePollProfile(
+  db: DB,
+  input: {
+    id: number;
+    name?: string;
+    intervalSec?: number;
+    timeoutMs?: number;
+    retries?: number;
+    enabled?: boolean;
+    config?: any;
+  }
+): PollProfileRow | null {
+  const existing = getPollProfileById(db, input.id);
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  const next = {
+    name: input.name ?? existing.name,
+    intervalSec: input.intervalSec ?? existing.intervalSec,
+    timeoutMs: input.timeoutMs ?? existing.timeoutMs,
+    retries: input.retries ?? existing.retries,
+    enabled: input.enabled ?? existing.enabled,
+    config: input.config ?? existing.config,
+  };
+  db.prepare(
+    `UPDATE poll_profiles
+     SET name = ?, interval_sec = ?, timeout_ms = ?, retries = ?, enabled = ?, config_json = ?, updated_at = ?
+     WHERE id = ?`
+  ).run(
+    next.name,
+    next.intervalSec,
+    next.timeoutMs,
+    next.retries,
+    next.enabled ? 1 : 0,
+    JSON.stringify(next.config ?? {}),
+    now,
+    input.id
+  );
+  return getPollProfileById(db, input.id);
 }
 
 export type WorkerRegistrationRow = {
@@ -1159,6 +1325,336 @@ export function listLldpNeighborsForDevice(db: DB, deviceId: number) {
     .all(deviceId) as any[];
 }
 
+export function listLldpNeighbors(db: DB, input?: { deviceId?: number }) {
+  return db
+    .prepare(
+      `SELECT id, device_id as deviceId, local_port as localPort, remote_sys_name as remoteSysName,
+              remote_port_id as remotePortId, remote_chassis_id as remoteChassisId, remote_mgmt_ip as remoteMgmtIp,
+              collected_at as collectedAt, created_at as createdAt
+       FROM lldp_neighbors
+       ${input?.deviceId ? "WHERE device_id = ?" : ""}
+       ORDER BY device_id ASC, id ASC`
+    )
+    .all(input?.deviceId ? input.deviceId : undefined) as any[];
+}
+
+export function getLldpNeighborById(db: DB, id: number) {
+  return db
+    .prepare(
+      `SELECT id, device_id as deviceId, local_port as localPort, remote_sys_name as remoteSysName,
+              remote_port_id as remotePortId, remote_chassis_id as remoteChassisId, remote_mgmt_ip as remoteMgmtIp,
+              collected_at as collectedAt, created_at as createdAt
+       FROM lldp_neighbors
+       WHERE id = ?
+       LIMIT 1`
+    )
+    .get(id) as any;
+}
+
+export function listNeighborsWithReview(db: DB, input?: { deviceId?: number; status?: string }) {
+  const params: any[] = [];
+  let where = "";
+  if (input?.deviceId) {
+    where += (where ? " AND " : "WHERE ") + "n.device_id = ?";
+    params.push(input.deviceId);
+  }
+  if (input?.status) {
+    where += (where ? " AND " : "WHERE ") + "(r.status = ?)";
+    params.push(input.status);
+  }
+  const rows = db
+    .prepare(
+      `SELECT n.id, n.device_id as deviceId, n.local_port as localPort, n.remote_sys_name as remoteSysName,
+              n.remote_port_id as remotePortId, n.remote_chassis_id as remoteChassisId, n.remote_mgmt_ip as remoteMgmtIp,
+              n.collected_at as collectedAt, n.created_at as createdAt,
+              r.status as reviewStatus, r.linked_device_id as linkedDeviceId, r.promoted_device_id as promotedDeviceId,
+              r.note as reviewNote, r.updated_at as reviewUpdatedAt
+       FROM lldp_neighbors n
+       LEFT JOIN neighbor_reviews r ON r.neighbor_id = n.id
+       ${where}
+       ORDER BY n.device_id ASC, n.id ASC`
+    )
+    .all(...params) as any[];
+  return rows.map((r) => ({
+    ...r,
+    reviewStatus: r.reviewStatus ?? "new",
+  }));
+}
+
+export function setNeighborReview(
+  db: DB,
+  input: { neighborId: number; status: string; linkedDeviceId?: number | null; promotedDeviceId?: number | null; note?: string | null }
+) {
+  const now = new Date().toISOString();
+  const existing = db
+    .prepare(
+      `SELECT id FROM neighbor_reviews WHERE neighbor_id = ?
+       LIMIT 1`
+    )
+    .get(input.neighborId) as { id: number } | undefined;
+  if (existing) {
+    db.prepare(
+      `UPDATE neighbor_reviews
+       SET status = ?, linked_device_id = ?, promoted_device_id = ?, note = ?, updated_at = ?
+       WHERE neighbor_id = ?`
+    ).run(
+      input.status,
+      input.linkedDeviceId ?? null,
+      input.promotedDeviceId ?? null,
+      input.note ?? null,
+      now,
+      input.neighborId
+    );
+  } else {
+    db.prepare(
+      `INSERT INTO neighbor_reviews (neighbor_id, status, linked_device_id, promoted_device_id, note, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      input.neighborId,
+      input.status,
+      input.linkedDeviceId ?? null,
+      input.promotedDeviceId ?? null,
+      input.note ?? null,
+      now,
+      now
+    );
+  }
+}
+
+export function logNeighborReviewEvent(
+  db: DB,
+  input: { neighborId: number; action: string; actor?: string | null; deviceId?: number | null; note?: string | null }
+) {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO neighbor_review_events (neighbor_id, action, actor, device_id, note, created_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(input.neighborId, input.action, input.actor ?? null, input.deviceId ?? null, input.note ?? null, now);
+}
+
+export function listNeighborReviewEvents(db: DB, input?: { neighborId?: number; deviceId?: number; limit?: number }) {
+  const params: any[] = [];
+  let where = "";
+  if (input?.neighborId) {
+    where += (where ? " AND " : "WHERE ") + "neighbor_id = ?";
+    params.push(input.neighborId);
+  }
+  if (input?.deviceId) {
+    where += (where ? " AND " : "WHERE ") + "(device_id = ? OR neighbor_id IN (SELECT id FROM lldp_neighbors WHERE device_id = ?))";
+    params.push(input.deviceId, input.deviceId);
+  }
+  const limit = input?.limit ?? 200;
+  return db
+    .prepare(
+      `SELECT id, neighbor_id as neighborId, action, actor, device_id as deviceId, note, created_at as createdAt
+       FROM neighbor_review_events
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT ${limit}`
+    )
+    .all(...params) as any[];
+}
+
+export function logAdminAuditEvent(
+  db: DB,
+  input: {
+    entityType: string;
+    entityId?: number | null;
+    action: string;
+    actor?: string | null;
+    note?: string | null;
+    before?: any;
+    after?: any;
+  }
+) {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO admin_audit_events (entity_type, entity_id, action, actor, note, before_json, after_json, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    input.entityType,
+    input.entityId ?? null,
+    input.action,
+    input.actor ?? null,
+    input.note ?? null,
+    input.before !== undefined ? JSON.stringify(input.before) : null,
+    input.after !== undefined ? JSON.stringify(input.after) : null,
+    now
+  );
+}
+
+export function listAdminAuditEvents(
+  db: DB,
+  input?: { entityType?: string; entityId?: number; action?: string; limit?: number }
+) {
+  const params: any[] = [];
+  let where = "";
+  if (input?.entityType) {
+    where += (where ? " AND " : "WHERE ") + "entity_type = ?";
+    params.push(input.entityType);
+  }
+  if (input?.entityId) {
+    where += (where ? " AND " : "WHERE ") + "entity_id = ?";
+    params.push(input.entityId);
+  }
+  if (input?.action) {
+    where += (where ? " AND " : "WHERE ") + "action = ?";
+    params.push(input.action);
+  }
+  const limit = input?.limit ?? 200;
+  return db
+    .prepare(
+      `SELECT id, entity_type as entityType, entity_id as entityId, action, actor, note,
+              before_json as beforeJson, after_json as afterJson, created_at as createdAt
+       FROM admin_audit_events
+       ${where}
+       ORDER BY created_at DESC
+       LIMIT ${limit}`
+    )
+    .all(...params) as any[];
+}
+
+export type LicenseState = {
+  status: string;
+  subscriptionStatus: string;
+  licenseKey: string | null;
+  customer: string | null;
+  entitlementStatus?: string | null;
+  activatedAt?: string | null;
+  validatedAt: string | null;
+  expiresAt: string | null;
+  graceUntil?: string | null;
+  lastValidationSource?: string | null;
+  lastError: string | null;
+  lastErrorCode?: string | null;
+  nextValidationDueAt?: string | null;
+  updatedAt: string;
+};
+
+export function getLicenseState(db: DB): LicenseState {
+  const row =
+    (db
+      .prepare(
+        `SELECT status, subscription_status as subscriptionStatus, license_key as licenseKey, customer,
+                entitlement_status as entitlementStatus, activated_at as activatedAt,
+                validated_at as validatedAt, expires_at as expiresAt, grace_until as graceUntil,
+                last_validation_source as lastValidationSource, last_error as lastError, last_error_code as lastErrorCode,
+                next_validation_due_at as nextValidationDueAt, updated_at as updatedAt
+         FROM license_state WHERE id = 1`
+      )
+      .get() as LicenseState | undefined) ??
+    ({
+      status: "unlicensed",
+      subscriptionStatus: "inactive",
+      licenseKey: null,
+      customer: null,
+      entitlementStatus: null,
+      activatedAt: null,
+      validatedAt: null,
+      expiresAt: null,
+      graceUntil: null,
+      lastValidationSource: null,
+      lastError: null,
+      lastErrorCode: null,
+      nextValidationDueAt: null,
+      updatedAt: new Date().toISOString(),
+    } as LicenseState);
+  return row;
+}
+
+export function setLicenseState(
+  db: DB,
+  input: Partial<Omit<LicenseState, "updatedAt">> & { status: string; subscriptionStatus: string }
+): LicenseState {
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE license_state
+     SET status = ?, subscription_status = ?, license_key = COALESCE(?, license_key),
+         customer = COALESCE(?, customer), entitlement_status = COALESCE(?, entitlement_status),
+         activated_at = COALESCE(?, activated_at),
+         validated_at = COALESCE(?, validated_at),
+         expires_at = COALESCE(?, expires_at), grace_until = COALESCE(?, grace_until),
+         last_validation_source = COALESCE(?, last_validation_source),
+         last_error = COALESCE(?, last_error), last_error_code = COALESCE(?, last_error_code),
+         next_validation_due_at = COALESCE(?, next_validation_due_at),
+         updated_at = ?
+     WHERE id = 1`
+  ).run(
+    input.status,
+    input.subscriptionStatus,
+    input.licenseKey ?? null,
+    input.customer ?? null,
+    input.entitlementStatus ?? null,
+    input.activatedAt ?? null,
+    input.validatedAt ?? null,
+    input.expiresAt ?? null,
+    input.graceUntil ?? null,
+    input.lastValidationSource ?? null,
+    input.lastError ?? null,
+    input.lastErrorCode ?? null,
+    input.nextValidationDueAt ?? null,
+    now
+  );
+  return getLicenseState(db);
+}
+
+export type EffectiveLicense = {
+  allowed: boolean;
+  effectiveStatus: string;
+  reason?: string;
+  expiresAt?: string | null;
+  graceUntil?: string | null;
+  state: LicenseState;
+};
+
+export function evaluateLicenseState(db: DB): EffectiveLicense {
+  const state = getLicenseState(db);
+  const now = Date.now();
+  const expires = state.expiresAt ? Date.parse(state.expiresAt) : null;
+  const grace = state.graceUntil ? Date.parse(state.graceUntil) : null;
+
+  const isActive = state.status === "active" && state.subscriptionStatus === "active";
+  const inGrace = !isActive && grace !== null && grace > now;
+  let allowed = isActive || inGrace;
+  let reason = allowed ? undefined : "license_required";
+  let effectiveStatus = "restricted";
+
+  if (isActive) {
+    effectiveStatus = "active";
+  } else if (inGrace) {
+    effectiveStatus = "grace";
+    reason = "license_grace_active";
+  } else if (state.status === "revoked") {
+    reason = "license_revoked";
+    effectiveStatus = "revoked";
+  } else if (state.status === "invalid") {
+    reason = "license_invalid";
+    effectiveStatus = "invalid";
+  } else if (state.status === "expired") {
+    reason = "license_expired";
+    effectiveStatus = "expired";
+  } else if (state.subscriptionStatus === "inactive") {
+    reason = "paid_subscription_required";
+    effectiveStatus = "inactive_subscription";
+  } else if (state.status === "unlicensed") {
+    reason = "license_required";
+    effectiveStatus = "unlicensed";
+  }
+
+  return {
+    allowed,
+    effectiveStatus,
+    reason,
+    expiresAt: state.expiresAt,
+    graceUntil: state.graceUntil,
+    state,
+  };
+}
+
+export function licenseAllowsCollection(db: DB): EffectiveLicense {
+  return evaluateLicenseState(db);
+}
+
 export function listDiscoveredCandidatesForSourceDevice(db: DB, sourceDeviceId: number) {
   return db
     .prepare(
@@ -1303,6 +1799,7 @@ export function listPollTargets(db: DB, input?: { deviceId?: number; profileId?:
 }
 
 export function listEnabledPollTargets(db: DB): PollTargetRow[] {
+  if (!licenseAllowsCollection(db).allowed) return [];
   const rows = db
     .prepare(
       `SELECT id, device_id as deviceId, profile_id as profileId, enabled,
@@ -1360,13 +1857,53 @@ export function createPollTarget(db: DB, input: { deviceId: number; profileId: n
   };
 }
 
+export function findPollTargetByDeviceProfile(db: DB, deviceId: number, profileId: number): PollTargetRow | null {
+  const row = db
+    .prepare(
+      `SELECT id, device_id as deviceId, profile_id as profileId, enabled, created_at as createdAt, updated_at as updatedAt
+       FROM poll_targets
+       WHERE device_id = ? AND profile_id = ?
+       LIMIT 1`
+    )
+    .get(deviceId, profileId) as
+    | {
+        id: number;
+        deviceId: number;
+        profileId: number;
+        enabled: number;
+        createdAt: string;
+        updatedAt: string;
+      }
+    | undefined;
+  return row ? { ...row, enabled: Boolean(row.enabled) } : null;
+}
+
+function assertLicense(db: DB) {
+  const lic = licenseAllowsCollection(db);
+  if (!lic.allowed) {
+    const err = new Error(lic.reason ?? "license_required");
+    throw err;
+  }
+}
+
+export function updatePollTarget(db: DB, input: { id: number; enabled?: boolean }): PollTargetRow | null {
+  const existing = getPollTargetById(db, input.id);
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  const enabled = input.enabled ?? existing.enabled;
+  db.prepare(`UPDATE poll_targets SET enabled = ?, updated_at = ? WHERE id = ?`).run(enabled ? 1 : 0, now, input.id);
+  return getPollTargetById(db, input.id);
+}
+
 export function enqueuePollJobForTarget(db: DB, targetId: number): PollJobRow {
+  assertLicense(db);
   const target = getPollTargetById(db, targetId);
   if (!target) throw new Error("target_not_found");
   return createPollJob(db, { targetId });
 }
 
 export function enqueuePollJobsForTargets(db: DB, targetIds: number[]): PollJobRow[] {
+  assertLicense(db);
   const tx = db.transaction((ids: number[]) => ids.map((id) => enqueuePollJobForTarget(db, id)));
   return tx(targetIds);
 }
@@ -1455,6 +1992,7 @@ export function getPollJobById(db: DB, id: number): PollJobRow | null {
 }
 
 export function claimNextPendingPollJob(db: DB, leaseOwner: string): PollJobRow | null {
+  if (!licenseAllowsCollection(db).allowed) return null;
   const now = new Date().toISOString();
 
   const tx = db.transaction(() => {
@@ -1515,6 +2053,7 @@ export function claimPendingPollJobsBatch(
     shardHint?: number;
   }
 ): PollJobRow[] {
+  if (!licenseAllowsCollection(db).allowed) return [];
   if (!input.supportedKinds.length || input.limit <= 0) return [];
   const now = new Date().toISOString();
   const kindsPlaceholders = input.supportedKinds.map(() => "?").join(",");
@@ -1823,6 +2362,7 @@ export function requeueStaleRunningPollJobs(db: DB, olderThanSeconds: number): P
 }
 
 export function claimNextPendingPollJobForWorker(db: DB, input: { workerName: string; workerType: string }): PollJobRow | null {
+  if (!licenseAllowsCollection(db).allowed) return null;
   const now = new Date().toISOString();
   const row = db
     .prepare(
@@ -1886,6 +2426,7 @@ export function requeueStaleRunningPollJobsForWorker(db: DB, input: { workerName
 }
 
 export function claimNextPendingPollJobForWorkerCapabilities(db: DB, input: { workerName: string; supportedKinds: string[] }): PollJobRow | null {
+  if (!licenseAllowsCollection(db).allowed) return null;
   if (!input.supportedKinds.length) return null;
   const now = new Date().toISOString();
   const placeholders = input.supportedKinds.map(() => "?").join(",");
@@ -2214,6 +2755,7 @@ export function listStaleRunningPollJobsForWorker(db: DB, input: { workerName: s
 }
 
 export function createPollJob(db: DB, input: { targetId: number; scheduledAt?: string; status?: string }): PollJobRow {
+  assertLicense(db);
   const now = new Date().toISOString();
   const scheduledAt = input.scheduledAt ?? now;
   const status = input.status ?? "pending";

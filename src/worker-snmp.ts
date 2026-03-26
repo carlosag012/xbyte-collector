@@ -17,6 +17,7 @@ import {
   replaceInterfaceSnapshotsForDevice,
   replaceLldpNeighborsForDevice,
   upsertDiscoveredDeviceCandidatesFromLldp,
+  licenseAllowsCollection,
   type DB,
 } from "./db.js";
 
@@ -136,7 +137,88 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
         currentJobIds.delete(job.id);
       }
 
+      const lic = licenseAllowsCollection(db);
+      if (!lic.allowed) {
+        for (const { job, detail } of validDetails) {
+          finishPollJob(db, {
+            jobId: job.id,
+            status: "failed",
+            result: {
+              workerType: "snmp",
+              success: false,
+              blockedByLicense: true,
+              code: lic.reason ?? "license_required",
+              effectiveStatus: lic.effectiveStatus,
+              message: `Collection blocked: ${lic.reason ?? "license_required"}`,
+              processedAt: new Date().toISOString(),
+              summary: { system: null, interfacesCount: 0, lldpNeighborsCount: 0 },
+              discovery: { system: null, interfaces: [], lldpNeighbors: [] },
+              context: {
+                jobId: detail.job.id,
+                targetId: detail.target.id,
+                deviceId: detail.device.id,
+                deviceHostname: detail.device.hostname,
+                deviceIpAddress: detail.device.ipAddress,
+                profileId: detail.profile.id,
+                profileKind: detail.profile.kind,
+              },
+            },
+          });
+          currentJobIds.delete(job.id);
+          failCount++;
+        }
+        log({
+          level: "warn",
+          msg: "snmp batch blocked by license",
+          workerName: workerCfg.workerName,
+          effectiveStatus: lic.effectiveStatus,
+          reason: lic.reason,
+          blocked: validDetails.length,
+          claimed: jobs.length,
+        });
+        continue;
+      }
+
       const tasks = validDetails.map(({ job, detail }) => async () => {
+        const licExec = licenseAllowsCollection(db);
+        if (!licExec.allowed) {
+          finishPollJob(db, {
+            jobId: job.id,
+            status: "failed",
+            result: {
+              workerType: "snmp",
+              success: false,
+              blockedByLicense: true,
+              code: licExec.reason ?? "license_required",
+              effectiveStatus: licExec.effectiveStatus,
+              message: `Collection blocked: ${licExec.reason ?? "license_required"}`,
+              processedAt: new Date().toISOString(),
+              summary: { system: null, interfacesCount: 0, lldpNeighborsCount: 0 },
+              discovery: { system: null, interfaces: [], lldpNeighbors: [] },
+              context: {
+                jobId: detail.job.id,
+                targetId: detail.target.id,
+                deviceId: detail.device.id,
+                deviceHostname: detail.device.hostname,
+                deviceIpAddress: detail.device.ipAddress,
+                profileId: detail.profile.id,
+                profileKind: detail.profile.kind,
+              },
+            },
+          });
+          currentJobIds.delete(job.id);
+          failCount++;
+          log({
+            level: "warn",
+            msg: "snmp execution blocked by license",
+            workerName: workerCfg.workerName,
+            jobId: detail.job.id,
+            effectiveStatus: licExec.effectiveStatus,
+            reason: licExec.reason,
+          });
+          return;
+        }
+
         log({
           level: "info",
           msg: "snmp discovery start",

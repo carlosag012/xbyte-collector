@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve, join, normalize } from "node:path";
+import os from "node:os";
 import { loadConfig } from "./config.js";
 import { runtimeState, setBootstrapState, setCloudState, setRegisteredWorkers } from "./runtime-state.js";
 import { parseNonNegativeInteger } from "./http-utils.js";
@@ -16,8 +17,10 @@ import {
   setBootstrapStateRow,
   createInitialAdminIfMissing,
   createDevice,
+  updateDevice,
   listDevices,
   createPollProfile,
+  updatePollProfile,
   listPollProfiles,
   listWorkerRegistrations,
   upsertWorkerRegistration,
@@ -30,6 +33,7 @@ import {
   listPollTargets,
   listEnabledPollTargets,
   createPollTarget,
+  updatePollTarget,
   getPollTargetById,
   listPollJobs,
   claimNextPendingPollJob,
@@ -68,6 +72,21 @@ import {
   getSystemSnapshotsForDevice,
   listInterfaceSnapshotsForDevice,
   listLldpNeighborsForDevice,
+  listLldpNeighbors,
+  listNeighborsWithReview,
+  getLldpNeighborById,
+  setNeighborReview,
+  logNeighborReviewEvent,
+  listNeighborReviewEvents,
+  logAdminAuditEvent,
+  listAdminAuditEvents,
+  findDeviceByIpOrHostname,
+  findPollProfileByNameAndKind,
+  findPollTargetByDeviceProfile,
+  getLicenseState,
+  setLicenseState,
+  licenseAllowsCollection,
+  evaluateLicenseState,
   listDiscoveredCandidatesForSourceDevice,
   getCompany,
   upsertCompany,
@@ -528,6 +547,13 @@ const server = createServer((req, res) => {
             site: typeof body.site === "string" ? body.site : undefined,
             org: typeof body.org === "string" ? body.org : undefined,
           });
+          logAdminAuditEvent(db, {
+            entityType: "device",
+            entityId: device.id,
+            action: "create",
+            actor: currentUsernameFromRequest(db, req),
+            after: device,
+          });
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true, device }));
         } catch (err: any) {
@@ -536,6 +562,50 @@ const server = createServer((req, res) => {
             res.end(JSON.stringify({ ok: false, error: "device_ip_exists" }));
             return;
           }
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/devices/update") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        if (!body || !Number.isFinite(body.id)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_device_payload" }));
+          return;
+        }
+        try {
+          if (!db) throw new Error("db missing");
+          const updated = updateDevice(db, {
+            id: Number(body.id),
+            hostname: typeof body.hostname === "string" ? body.hostname : undefined,
+            ipAddress: typeof body.ipAddress === "string" ? body.ipAddress : undefined,
+            enabled: body.enabled !== undefined ? Boolean(body.enabled) : undefined,
+            site: body.site === undefined ? undefined : body.site,
+            org: body.org === undefined ? undefined : body.org,
+          });
+          if (!updated) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ ok: false, error: "device_not_found" }));
+            return;
+          }
+          logAdminAuditEvent(db, {
+            entityType: "device",
+            entityId: updated.id,
+            action: "update",
+            actor: currentUsernameFromRequest(db, req),
+            after: updated,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, device: updated }));
+        } catch {
           res.writeHead(500);
           res.end(JSON.stringify({ ok: false, error: "db_error" }));
         }
@@ -593,8 +663,60 @@ const server = createServer((req, res) => {
             enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
             config: typeof body.config === "object" && body.config !== null ? body.config : {},
           });
+          logAdminAuditEvent(db, {
+            entityType: "profile",
+            entityId: profile.id,
+            action: "create",
+            actor: currentUsernameFromRequest(db, req),
+            after: profile,
+          });
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true, profile }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/poll-profiles/update") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        if (!body || !Number.isFinite(body.id)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_poll_profile_payload" }));
+          return;
+        }
+        try {
+          if (!db) throw new Error("db missing");
+          const updated = updatePollProfile(db, {
+            id: Number(body.id),
+            name: typeof body.name === "string" ? body.name : undefined,
+            intervalSec: Number.isFinite(body.intervalSec) ? Number(body.intervalSec) : undefined,
+            timeoutMs: Number.isFinite(body.timeoutMs) ? Number(body.timeoutMs) : undefined,
+            retries: Number.isFinite(body.retries) ? Number(body.retries) : undefined,
+            enabled: body.enabled !== undefined ? Boolean(body.enabled) : undefined,
+            config: typeof body.config === "object" && body.config !== null ? body.config : undefined,
+          });
+          if (!updated) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ ok: false, error: "profile_not_found" }));
+            return;
+          }
+          logAdminAuditEvent(db, {
+            entityType: "profile",
+            entityId: updated.id,
+            action: "update",
+            actor: currentUsernameFromRequest(db, req),
+            after: updated,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, profile: updated }));
         } catch {
           res.writeHead(500);
           res.end(JSON.stringify({ ok: false, error: "db_error" }));
@@ -788,6 +910,27 @@ const server = createServer((req, res) => {
   }
 
   if (method === "GET" && url.startsWith("/api/tdt/lldp-neighbors")) {
+    if (url.startsWith("/api/tdt/lldp-neighbors-all")) {
+      try {
+        if (!db) throw new Error("db missing");
+        const parsed = new URL(req.url ?? "/api/tdt/lldp-neighbors-all", "http://localhost");
+        const deviceIdStr = parsed.searchParams.get("deviceId");
+        const deviceId = deviceIdStr ? Number(deviceIdStr) : undefined;
+        if (deviceIdStr && (!Number.isFinite(deviceId) || deviceId! <= 0 || !Number.isInteger(deviceId!))) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_tdt_lldp_query" }));
+          return;
+        }
+        const neighbors = listLldpNeighbors(db, { deviceId });
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, neighbors }));
+      } catch {
+        res.writeHead(500);
+        res.end(JSON.stringify({ ok: false, error: "db_error" }));
+      }
+      return;
+    }
+
     try {
       if (!db) throw new Error("db missing");
       const parsed = new URL(req.url ?? "/api/tdt/lldp-neighbors", "http://localhost");
@@ -829,6 +972,501 @@ const server = createServer((req, res) => {
     return;
   }
 
+  if (method === "GET" && url.startsWith("/api/tdt/lldp-neighbors-all")) {
+    try {
+      if (!db) throw new Error("db missing");
+      const parsed = new URL(req.url ?? "/api/tdt/lldp-neighbors-all", "http://localhost");
+      const deviceIdStr = parsed.searchParams.get("deviceId");
+      const deviceId = deviceIdStr ? Number(deviceIdStr) : undefined;
+      if (deviceIdStr && (!Number.isFinite(deviceId) || deviceId! <= 0 || !Number.isInteger(deviceId!))) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_tdt_lldp_query" }));
+        return;
+      }
+      const neighbors = listLldpNeighbors(db, { deviceId });
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, neighbors }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url.startsWith("/api/neighbors")) {
+    try {
+      if (!db) throw new Error("db missing");
+      const parsed = new URL(req.url ?? "/api/neighbors", "http://localhost");
+      const deviceIdStr = parsed.searchParams.get("deviceId");
+      const status = parsed.searchParams.get("status");
+      const deviceId = deviceIdStr ? Number(deviceIdStr) : undefined;
+      if (deviceIdStr && (!Number.isFinite(deviceId) || deviceId! <= 0 || !Number.isInteger(deviceId!))) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_neighbor_query" }));
+        return;
+      }
+      const neighbors = listNeighborsWithReview(db, { deviceId, status: status || undefined });
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, neighbors }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url.startsWith("/api/neighbors/history")) {
+    try {
+      if (!db) throw new Error("db missing");
+      const parsed = new URL(req.url ?? "/api/neighbors/history", "http://localhost");
+      const neighborIdStr = parsed.searchParams.get("neighborId");
+      const deviceIdStr = parsed.searchParams.get("deviceId");
+      const neighborId = neighborIdStr ? Number(neighborIdStr) : undefined;
+      const deviceId = deviceIdStr ? Number(deviceIdStr) : undefined;
+      const events = listNeighborReviewEvents(db, {
+        neighborId: neighborId && Number.isFinite(neighborId) ? neighborId : undefined,
+        deviceId: deviceId && Number.isFinite(deviceId) ? deviceId : undefined,
+        limit: 200,
+      });
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, events }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "POST" && url === "/api/neighbors/promote") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        if (!body || !Number.isFinite(body.neighborId) || !body.hostname || !body.ipAddress) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_neighbor_promote_payload" }));
+          return;
+        }
+        try {
+          if (!db) throw new Error("db missing");
+          const neighbor = getLldpNeighborById(db, Number(body.neighborId));
+          if (!neighbor) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ ok: false, error: "neighbor_not_found" }));
+            return;
+          }
+          const device = createDevice(db, {
+            hostname: body.hostname,
+            ipAddress: body.ipAddress,
+            enabled: true,
+          });
+          logAdminAuditEvent(db, {
+            entityType: "device",
+            entityId: device.id,
+            action: "create",
+            actor: currentUsernameFromRequest(db, req),
+            after: device,
+          });
+          setNeighborReview(db, {
+            neighborId: neighbor.id,
+            status: "promoted",
+            promotedDeviceId: device.id,
+            linkedDeviceId: null,
+            note: body.note ?? null,
+          });
+          logNeighborReviewEvent(db, {
+            neighborId: neighbor.id,
+            action: "promote",
+            actor: currentUsernameFromRequest(db, req),
+            deviceId: device.id,
+            note: body.note ?? null,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, device }));
+        } catch (err: any) {
+          if (err?.message === "device_ip_exists") {
+            res.writeHead(400);
+            res.end(JSON.stringify({ ok: false, error: "device_ip_exists" }));
+            return;
+          }
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/neighbors/link") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        if (!body || !Number.isFinite(body.neighborId) || !Number.isFinite(body.deviceId)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_neighbor_link_payload" }));
+          return;
+        }
+        try {
+          if (!db) throw new Error("db missing");
+          const neighbor = getLldpNeighborById(db, Number(body.neighborId));
+          if (!neighbor) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ ok: false, error: "neighbor_not_found" }));
+            return;
+          }
+          const device = getDeviceById(db, Number(body.deviceId));
+          if (!device) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ ok: false, error: "device_not_found" }));
+            return;
+          }
+          setNeighborReview(db, {
+            neighborId: neighbor.id,
+            status: "linked",
+            linkedDeviceId: device.id,
+            promotedDeviceId: null,
+            note: body.note ?? null,
+          });
+          logAdminAuditEvent(db, {
+            entityType: "device",
+            entityId: device.id,
+            action: "link_neighbor",
+            actor: currentUsernameFromRequest(db, req),
+            note: body.note ?? null,
+          });
+          logNeighborReviewEvent(db, {
+            neighborId: neighbor.id,
+            action: "link",
+            actor: currentUsernameFromRequest(db, req),
+            deviceId: device.id,
+            note: body.note ?? null,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, neighborId: neighbor.id, device }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/neighbors/ignore") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        if (!body || !Number.isFinite(body.neighborId)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_neighbor_ignore_payload" }));
+          return;
+        }
+        try {
+          if (!db) throw new Error("db missing");
+          const neighbor = getLldpNeighborById(db, Number(body.neighborId));
+          if (!neighbor) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ ok: false, error: "neighbor_not_found" }));
+            return;
+          }
+          setNeighborReview(db, {
+            neighborId: neighbor.id,
+            status: "ignored",
+            linkedDeviceId: null,
+            promotedDeviceId: null,
+            note: body.note ?? null,
+          });
+          logNeighborReviewEvent(db, {
+            neighborId: neighbor.id,
+            action: "ignore",
+            actor: currentUsernameFromRequest(db, req),
+            note: body.note ?? null,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/neighbors/unignore") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        if (!body || !Number.isFinite(body.neighborId)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_neighbor_unignore_payload" }));
+          return;
+        }
+        try {
+          if (!db) throw new Error("db missing");
+          const neighbor = getLldpNeighborById(db, Number(body.neighborId));
+          if (!neighbor) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ ok: false, error: "neighbor_not_found" }));
+            return;
+          }
+          setNeighborReview(db, {
+            neighborId: neighbor.id,
+            status: "new",
+            linkedDeviceId: null,
+            promotedDeviceId: null,
+            note: null,
+          });
+          logNeighborReviewEvent(db, {
+            neighborId: neighbor.id,
+            action: "unignore",
+            actor: currentUsernameFromRequest(db, req),
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "GET" && url === "/api/system/services") {
+    try {
+      if (!db) throw new Error("db missing");
+      const workers = listWorkerRegistrations(db);
+      const summary = getWorkerMetricsSummaryByType(db);
+      const exec = getWorkerExecutionSummary(db);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, workers, summary: summary.types, execution: exec.types }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "POST" && url === "/api/system/service/restart") {
+    // Restart not supported via UI; expose explicit unsupported response.
+    res.writeHead(503);
+    res.end(JSON.stringify({ ok: false, supported: false, error: "restart_not_supported_via_ui" }));
+    return;
+  }
+
+  if (method === "GET" && url === "/api/system/runtime") {
+    try {
+      const runtime = {
+        hostname: os.hostname(),
+        platform: os.platform(),
+        arch: os.arch(),
+        nodeVersion: process.version,
+        uptimeSeconds: Math.round(process.uptime()),
+        cwd: process.cwd(),
+        sqlitePath: config.sqlitePath,
+        version: versionInfo,
+      };
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, runtime }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "runtime_unavailable" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url === "/api/system/storage") {
+    try {
+      const dbPath = resolve(config.sqlitePath);
+      const exists = existsSync(dbPath);
+      const stats = exists ? statSync(dbPath) : null;
+      const logsPath = join(process.cwd(), "var", "logs", "xbyte-collector.log");
+      const storage = {
+        dbPath,
+        dbExists: exists,
+        dbSizeBytes: stats?.size ?? null,
+        logPath: logsPath,
+      };
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, storage }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "storage_unavailable" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url === "/api/system/recent-activity") {
+    try {
+      if (!db) throw new Error("db missing");
+      const audits = listAdminAuditEvents(db, { limit: 50 });
+      const neighborEvents = listNeighborReviewEvents(db, { limit: 50 });
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, audits, neighborEvents }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url === "/api/licensing/status") {
+    try {
+      if (!db) throw new Error("db missing");
+      const state = getLicenseState(db);
+      const effective = evaluateLicenseState(db);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, licensing: state, effective }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "POST" && url === "/api/licensing/activate") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        if (!body || typeof body.licenseKey !== "string" || !body.licenseKey.trim()) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_license_payload" }));
+          return;
+        }
+        try {
+          if (!db) throw new Error("db missing");
+          const state = setLicenseState(db, {
+            status: "active",
+            subscriptionStatus: body.subscriptionStatus === "active" ? "active" : "active",
+            licenseKey: body.licenseKey.trim(),
+            customer: typeof body.customer === "string" ? body.customer : null,
+            validatedAt: new Date().toISOString(),
+            activatedAt: new Date().toISOString(),
+            expiresAt: body.expiresAt && typeof body.expiresAt === "string" ? body.expiresAt : null,
+            graceUntil: body.graceUntil && typeof body.graceUntil === "string" ? body.graceUntil : null,
+            lastError: null,
+          });
+          logAdminAuditEvent(db, {
+            entityType: "licensing",
+            entityId: 1,
+            action: "activate",
+            actor: currentUsernameFromRequest(db, req),
+            after: state,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, licensing: state }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/licensing/validate") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        try {
+          if (!db) throw new Error("db missing");
+          const current = getLicenseState(db);
+          if (!current.licenseKey) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ ok: false, error: "license_not_set" }));
+            return;
+          }
+          // Mock/local validator: simple rules based on key string for now
+          const key = current.licenseKey.toUpperCase();
+          let status = "active";
+          let subscriptionStatus = "active";
+          let expiresAt: string | null = current.expiresAt ?? null;
+          let graceUntil: string | null = current.graceUntil ?? null;
+          let lastError: string | null = null;
+          let lastErrorCode: string | null = null;
+          if (key.includes("EXPIRE")) {
+            status = "expired";
+            expiresAt = new Date(Date.now() - 24 * 3600 * 1000).toISOString();
+            graceUntil = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+          } else if (key.includes("REVOKE")) {
+            status = "revoked";
+            lastError = "revoked";
+            lastErrorCode = "license_revoked";
+          } else if (key.includes("INVALID")) {
+            status = "invalid";
+            lastError = "invalid_license";
+            lastErrorCode = "license_invalid";
+          } else if (key.includes("SUBOFF")) {
+            subscriptionStatus = "inactive";
+            lastError = "inactive_subscription";
+            lastErrorCode = "inactive_subscription";
+          }
+          const state = setLicenseState(db, {
+            status,
+            subscriptionStatus,
+            validatedAt: new Date().toISOString(),
+            expiresAt,
+            graceUntil,
+            lastValidationSource: "local",
+            lastError,
+            lastErrorCode,
+          });
+          logAdminAuditEvent(db, {
+            entityType: "licensing",
+            entityId: 1,
+            action: lastError ? "validate_failure" : "validate_success",
+            actor: currentUsernameFromRequest(db, req),
+            after: state,
+          });
+          const effective = evaluateLicenseState(db);
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, licensing: state, effective }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "GET" && url.startsWith("/api/audit")) {
+    try {
+      if (!db) throw new Error("db missing");
+      const parsed = new URL(req.url ?? "/api/audit", "http://localhost");
+      const entityType = parsed.searchParams.get("entityType") || undefined;
+      const entityIdStr = parsed.searchParams.get("entityId");
+      const action = parsed.searchParams.get("action") || undefined;
+      const limitStr = parsed.searchParams.get("limit");
+      const entityId = entityIdStr ? Number(entityIdStr) : undefined;
+      const limit = limitStr ? Number(limitStr) : undefined;
+      const events = listAdminAuditEvents(db, {
+        entityType,
+        entityId: entityId && Number.isFinite(entityId) ? entityId : undefined,
+        action,
+        limit: limit && Number.isFinite(limit) ? limit : undefined,
+      });
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, events }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
   if (method === "POST" && url === "/api/workers/heartbeat") {
     readJsonBody<any>(req)
       .then((body) => {
@@ -847,6 +1485,310 @@ const server = createServer((req, res) => {
           }
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true, worker }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "GET" && url === "/api/system/about") {
+    try {
+      const about = {
+        version: versionInfo,
+        serverTime: new Date().toISOString(),
+        db: db ? "ok" : "missing",
+        bootstrap: db ? getBootstrapState(db) : null,
+      };
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, about }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url === "/api/system/health") {
+    try {
+      if (!db) throw new Error("db missing");
+      const bootstrap = getBootstrapState(db);
+      const cloud = getCloudSyncState(db);
+      res.writeHead(200);
+      res.end(
+        JSON.stringify({
+          ok: true,
+          health: {
+            db: "ok",
+            bootstrap,
+            cloud,
+            workers: runtimeState.workers,
+          },
+        })
+      );
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url === "/api/system/logs") {
+    try {
+      const logPath = join(process.cwd(), "var", "logs", "xbyte-collector.log");
+      const fallbackPath = join(process.cwd(), "var", "log", "xbyte-collector.log");
+      const path = existsSync(logPath) ? logPath : fallbackPath;
+      let entries: Array<{ ts: string; line: string }> = [];
+      if (existsSync(path)) {
+        const content = readFileSync(path, "utf8");
+        const lines = content.split(/\r?\n/).filter(Boolean);
+        const tail = lines.slice(-200);
+        entries = tail.map((line) => {
+          const match = line.match(/^(\d{4}-\d{2}-\d{2}[^ ]*)\s+(.*)$/);
+          return { ts: match ? match[1] : "", line: match ? match[2] : line };
+        });
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, logs: entries }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "log_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url === "/api/backups/export/config") {
+    try {
+      if (!db) throw new Error("db missing");
+      const rows = getAllAppConfig(db);
+      logAdminAuditEvent(db, {
+        entityType: "backup",
+        action: "export_config",
+        actor: "local-user",
+        after: { count: Object.keys(rows ?? {}).length },
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, config: rows }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url === "/api/backups/export/inventory") {
+    try {
+      if (!db) throw new Error("db missing");
+      const inventory = {
+        devices: listDevices(db),
+        profiles: listPollProfiles(db),
+        targets: listPollTargets(db),
+        neighbors: listNeighborsWithReview(db),
+      };
+      logAdminAuditEvent(db, {
+        entityType: "backup",
+        action: "export_inventory",
+        actor: "local-user",
+        after: {
+          devices: inventory.devices?.length ?? 0,
+          profiles: inventory.profiles?.length ?? 0,
+          targets: inventory.targets?.length ?? 0,
+          neighbors: inventory.neighbors?.length ?? 0,
+        },
+      });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, inventory }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "POST" && url === "/api/backups/import/config") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        if (!body || typeof body.config !== "object" || body.config === null) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_config_import_payload" }));
+          return;
+        }
+        try {
+          if (!db) throw new Error("db missing");
+          const entries: Record<string, string> = {};
+          for (const [k, v] of Object.entries(body.config)) {
+            entries[k] = typeof v === "string" ? v : JSON.stringify(v);
+          }
+          upsertAppConfigEntries(db, entries);
+          syncConfigFromDb(db);
+          logAdminAuditEvent(db, {
+            entityType: "backup",
+            action: "import_config",
+            actor: "local-user",
+            after: { updated: Object.keys(entries).length },
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, updated: Object.keys(entries).length }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/backups/import/inventory") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        const inv = body?.inventory;
+        const dryRun = Boolean(body?.dryRun);
+        if (!inv || typeof inv !== "object") {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_inventory_import_payload" }));
+          return;
+        }
+        const devices = Array.isArray(inv.devices) ? inv.devices : [];
+        const profiles = Array.isArray(inv.profiles) ? inv.profiles : [];
+        const targets = Array.isArray(inv.targets) ? inv.targets : [];
+        const summary = {
+          dryRun,
+          devices: { created: 0, updated: 0, skipped: 0 },
+          profiles: { created: 0, updated: 0, skipped: 0 },
+          targets: { created: 0, skipped: 0 },
+          errors: [] as string[],
+          errorsDetailed: [] as any[],
+        };
+        try {
+          if (!db) throw new Error("db missing");
+          const deviceMap = new Map<string, number>(); // key ip or hostname -> id
+          for (const d of devices) {
+            if (!d || typeof d.hostname !== "string" || typeof d.ipAddress !== "string") {
+              summary.devices.skipped++;
+              summary.errors.push("invalid_device");
+              summary.errorsDetailed.push({ code: "invalid_device", hostname: d?.hostname, ipAddress: d?.ipAddress });
+              continue;
+            }
+            const existing = findDeviceByIpOrHostname(db, { ipAddress: d.ipAddress, hostname: d.hostname });
+            if (existing) {
+              summary.devices.updated++;
+              if (!dryRun) {
+                updateDevice(db, {
+                  id: existing.id,
+                  hostname: d.hostname,
+                  ipAddress: d.ipAddress,
+                  enabled: d.enabled !== undefined ? Boolean(d.enabled) : existing.enabled,
+                  site: d.site ?? existing.site,
+                  org: d.org ?? existing.org,
+                });
+              }
+              deviceMap.set(d.ipAddress, existing.id);
+              deviceMap.set(d.hostname, existing.id);
+            } else {
+              summary.devices.created++;
+              if (!dryRun) {
+                const created = createDevice(db, {
+                  hostname: d.hostname,
+                  ipAddress: d.ipAddress,
+                  enabled: d.enabled !== undefined ? Boolean(d.enabled) : true,
+                  site: d.site ?? null,
+                  org: d.org ?? null,
+                });
+                deviceMap.set(d.ipAddress, created.id);
+                deviceMap.set(d.hostname, created.id);
+              }
+            }
+          }
+
+          const profileMap = new Map<string, number>(); // name|kind -> id
+          for (const p of profiles) {
+            if (!p || typeof p.name !== "string" || typeof p.kind !== "string") {
+              summary.profiles.skipped++;
+              summary.errors.push("invalid_profile");
+              summary.errorsDetailed.push({ code: "invalid_profile", name: p?.name, kind: p?.kind });
+              continue;
+            }
+            const key = `${p.kind}|${p.name}`;
+            const existing = findPollProfileByNameAndKind(db, { name: p.name, kind: p.kind });
+            if (existing) {
+              summary.profiles.updated++;
+              if (!dryRun) {
+                updatePollProfile(db, {
+                  id: existing.id,
+                  name: p.name,
+                  intervalSec: p.intervalSec ?? existing.intervalSec,
+                  timeoutMs: p.timeoutMs ?? existing.timeoutMs,
+                  retries: p.retries ?? existing.retries,
+                  enabled: p.enabled !== undefined ? Boolean(p.enabled) : existing.enabled,
+                  config: p.config ?? existing.config,
+                });
+              }
+              profileMap.set(key, existing.id);
+            } else {
+              summary.profiles.created++;
+              if (!dryRun) {
+                const created = createPollProfile(db, {
+                  kind: p.kind,
+                  name: p.name,
+                  intervalSec: p.intervalSec ?? 300,
+                  timeoutMs: p.timeoutMs ?? 2000,
+                  retries: p.retries ?? 1,
+                  enabled: p.enabled !== undefined ? Boolean(p.enabled) : true,
+                  config: p.config ?? {},
+                });
+                profileMap.set(key, created.id);
+              }
+            }
+          }
+
+          for (const t of targets) {
+            const deviceKey = t.deviceIp ?? t.deviceHostname ?? null;
+            const profileKey = t.profileName && t.profileKind ? `${t.profileKind}|${t.profileName}` : null;
+            if (!deviceKey || !profileKey) {
+              summary.targets.skipped++;
+              summary.errors.push("invalid_target");
+              summary.errorsDetailed.push({ code: "invalid_target", deviceKey, profileKey });
+              continue;
+            }
+            const deviceId = deviceMap.get(deviceKey);
+            const profileId = profileMap.get(profileKey);
+            if (!deviceId || !profileId) {
+              summary.targets.skipped++;
+              summary.errors.push("target_missing_refs");
+              summary.errorsDetailed.push({ code: "target_missing_refs", deviceKey, profileKey });
+              continue;
+            }
+            const existing = findPollTargetByDeviceProfile(db, deviceId, profileId);
+            if (existing) {
+              summary.targets.skipped++;
+            } else {
+              summary.targets.created++;
+              if (!dryRun) {
+                createPollTarget(db, {
+                  deviceId,
+                  profileId,
+                  enabled: t.enabled !== undefined ? Boolean(t.enabled) : true,
+                });
+              }
+            }
+          }
+
+          logAdminAuditEvent(db, {
+            entityType: "backup",
+            action: dryRun ? "import_inventory_dry_run" : "import_inventory_apply",
+            actor: "local-user",
+            after: summary,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, summary }));
         } catch {
           res.writeHead(500);
           res.end(JSON.stringify({ ok: false, error: "db_error" }));
@@ -1070,8 +2012,55 @@ const server = createServer((req, res) => {
             profileId: Number(body.profileId),
             enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
           });
+          logAdminAuditEvent(db, {
+            entityType: "target",
+            entityId: target.id,
+            action: "create",
+            actor: currentUsernameFromRequest(db, req),
+            after: target,
+          });
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true, target }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/poll-targets/update") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        if (!body || !Number.isFinite(body.id)) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_poll_target_payload" }));
+          return;
+        }
+        try {
+          if (!db) throw new Error("db missing");
+          const updated = updatePollTarget(db, {
+            id: Number(body.id),
+            enabled: body.enabled !== undefined ? Boolean(body.enabled) : undefined,
+          });
+          if (!updated) {
+            res.writeHead(404);
+            res.end(JSON.stringify({ ok: false, error: "target_not_found" }));
+            return;
+          }
+          logAdminAuditEvent(db, {
+            entityType: "target",
+            entityId: updated.id,
+            action: "update",
+            actor: currentUsernameFromRequest(db, req),
+            after: updated,
+          });
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true, target: updated }));
         } catch {
           res.writeHead(500);
           res.end(JSON.stringify({ ok: false, error: "db_error" }));
@@ -1117,25 +2106,38 @@ const server = createServer((req, res) => {
         try {
           if (!db) throw new Error("db missing");
 
-          // Single-target enqueue
-          if (body && body.targetId !== undefined) {
-            if (!Number.isFinite(body.targetId) || !Number.isInteger(Number(body.targetId)) || Number(body.targetId) <= 0) {
-              res.writeHead(400);
-              res.end(JSON.stringify({ ok: false, error: "invalid_enqueue_payload" }));
-              return;
-            }
-            const target = getPollTargetById(db, Number(body.targetId));
-            if (!target) {
-              res.writeHead(404);
-              res.end(JSON.stringify({ ok: false, error: "target_not_found" }));
-              return;
-            }
-            if (!target.enabled) {
-              res.writeHead(400);
-              res.end(JSON.stringify({ ok: false, error: "target_disabled" }));
-              return;
-            }
-            const job = enqueuePollJobForTarget(db, target.id);
+      // Single-target enqueue
+      if (body && body.targetId !== undefined) {
+        if (!Number.isFinite(body.targetId) || !Number.isInteger(Number(body.targetId)) || Number(body.targetId) <= 0) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_enqueue_payload" }));
+          return;
+        }
+        const target = getPollTargetById(db, Number(body.targetId));
+        if (!target) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ ok: false, error: "target_not_found" }));
+          return;
+        }
+        if (!target.enabled) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "target_disabled" }));
+          return;
+        }
+        const lic = licenseAllowsCollection(db);
+        if (!lic.allowed) {
+          res.writeHead(403);
+          res.end(JSON.stringify({ ok: false, error: lic.reason ?? "license_required" }));
+          return;
+        }
+        const job = enqueuePollJobForTarget(db, target.id);
+        logAdminAuditEvent(db, {
+          entityType: "target",
+          entityId: target.id,
+          action: "enqueue_manual",
+              actor: currentUsernameFromRequest(db, req),
+              after: { jobId: job.id },
+            });
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true, job }));
             return;
@@ -3198,6 +4200,20 @@ function extractSessionId(cookieHeader?: string): string | null {
     }
   }
   return null;
+}
+
+function currentUsernameFromRequest(dbRef: DB | null, req: any): string {
+  try {
+    if (!dbRef) return "local-user";
+    const sessionId = extractSessionId(req.headers.cookie);
+    if (!sessionId) return "local-user";
+    const session = readValidSession(dbRef, sessionId);
+    if (!session) return "local-user";
+    const user = getUserById(dbRef, session.userId);
+    return user?.username ?? "local-user";
+  } catch {
+    return "local-user";
+  }
 }
 
 function serveStatic(pathname: string, res: import("node:http").ServerResponse): boolean {
