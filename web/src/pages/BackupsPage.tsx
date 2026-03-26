@@ -113,7 +113,7 @@ export default function BackupsPage() {
         title="Backups / Recovery"
         subtitle="Safely export or restore appliance config and inventory. Restore flows are merge-only and non-destructive."
       />
-      <div className="cards">
+      <div className="cards" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
         <Card title="Configuration Export">
           <p style={{ margin: 0, color: "var(--muted)" }}>Download appliance configuration as JSON.</p>
           <button style={{ marginTop: 10 }} onClick={exportConfig}>
@@ -128,7 +128,7 @@ export default function BackupsPage() {
         </Card>
       </div>
 
-      <div className="cards" style={{ marginTop: 16 }}>
+      <div className="cards" style={{ marginTop: 16, gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))" }}>
         <Card title="Import Config">
           <p style={{ margin: 0, color: "var(--muted)" }}>
             Merge-import config JSON previously exported. Non-destructive: existing keys are updated, new keys added.

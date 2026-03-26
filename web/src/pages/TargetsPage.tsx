@@ -149,11 +149,11 @@ export default function TargetsPage() {
                 ))}
               </select>
               <small style={{ color: "var(--muted)" }}>Pick a ping or SNMP profile appropriate for this device.</small>
-            </label>
-            <button type="submit">Create Target</button>
-            <small style={{ color: "var(--muted)" }}>
-              After creation: enqueue a poll to verify connectivity. Use Jobs/Logs for troubleshooting.
-            </small>
+              </label>
+              <button type="submit" className="btn-collector"><span className="btn-collector-label">Create Target</span></button>
+              <small style={{ color: "var(--muted)" }}>
+                After creation: enqueue a poll to verify connectivity. Use Jobs/Logs for troubleshooting.
+              </small>
           </form>
         </Card>
       </div>
@@ -175,15 +175,9 @@ export default function TargetsPage() {
             header: "Actions",
             render: (t: Target) => (
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => toggle(t)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  {t.enabled ? "Disable" : "Enable"}
-                </button>
-                <button onClick={() => enqueue(t)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  Enqueue
-                </button>
-                <button onClick={() => openHistory(t)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  History
-                </button>
+                <button className="btn-collector" onClick={() => toggle(t)}><span className="btn-collector-label">{t.enabled ? "Disable" : "Enable"}</span></button>
+                <button className="btn-collector" onClick={() => enqueue(t)}><span className="btn-collector-label">Enqueue</span></button>
+                <button className="btn-collector" onClick={() => openHistory(t)}><span className="btn-collector-label">History</span></button>
               </div>
             ),
           },

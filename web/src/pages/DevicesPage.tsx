@@ -245,11 +245,13 @@ export default function DevicesPage() {
               <span>Org</span>
               <input value={form.org} onChange={(e) => setForm({ ...form, org: e.target.value })} />
             </label>
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="submit">{editing ? "Update" : "Create"}</button>
+            <div style={{ display: "flex", gap: 8, flexDirection: "column" }}>
+              <button type="submit" className="btn-collector" style={{ width: "100%" }}>
+                <span className="btn-collector-label">{editing ? "Update" : "Create Device"}</span>
+              </button>
               {editing && (
-                <button type="button" onClick={() => setEditing(null)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  Cancel
+                <button type="button" className="btn-collector" onClick={() => setEditing(null)}>
+                  <span className="btn-collector-label">Cancel</span>
                 </button>
               )}
             </div>
@@ -282,15 +284,9 @@ export default function DevicesPage() {
             header: "Actions",
             render: (d: Device) => (
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => selectDevice(d.id)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  View
-                </button>
-                <button onClick={() => startEdit(d)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  Edit
-                </button>
-                <button onClick={() => toggleEnabled(d)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  {d.enabled ? "Disable" : "Enable"}
-                </button>
+                <button className="btn-collector" onClick={() => selectDevice(d.id)}><span className="btn-collector-label">View</span></button>
+                <button className="btn-collector" onClick={() => startEdit(d)}><span className="btn-collector-label">Edit</span></button>
+                <button className="btn-collector" onClick={() => toggleEnabled(d)}><span className="btn-collector-label">{d.enabled ? "Disable" : "Enable"}</span></button>
               </div>
             ),
           },
@@ -327,9 +323,7 @@ export default function DevicesPage() {
           {history.length > 0 && (
             <Card title="History">
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <button style={{ background: "transparent", border: "1px solid var(--border)" }} onClick={() => setHistoryModal(true)}>
-                  View change history
-                </button>
+                <button className="btn-collector" onClick={() => setHistoryModal(true)}><span className="btn-collector-label">View change history</span></button>
               </div>
             </Card>
           )}

@@ -25,7 +25,7 @@ export default function AboutPage() {
         subtitle="Version, build, and appliance identity for this xByte collector appliance."
         action={<button onClick={load}>Refresh</button>}
       />
-      <div className="cards">
+      <div className="cards" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
         <Card title="Version">
           <p style={{ margin: 0, color: "var(--muted)" }}>Version: {about?.version?.version ?? "unknown"}</p>
           <p style={{ margin: 0, color: "var(--muted)" }}>Commit: {about?.version?.gitCommit ?? "unknown"}</p>

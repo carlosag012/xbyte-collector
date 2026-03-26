@@ -78,19 +78,23 @@ export default function JobsPage() {
               <option value="completed">Completed</option>
               <option value="failed">Failed</option>
             </select>
-            <button onClick={load}>Refresh</button>
+            <button className="btn-topbar" onClick={load}>
+              Refresh
+            </button>
           </div>
         }
       />
 
       <div className="cards" style={{ marginBottom: 16 }}>
         <Card title="Manual enqueue">
-          <form onSubmit={enqueue} className="form-grid" style={{ gridTemplateColumns: "1fr auto" }}>
+          <form onSubmit={enqueue} className="form-grid">
             <label>
               <span>Target ID</span>
               <input value={targetId} onChange={(e) => setTargetId(e.target.value)} placeholder="e.g. 3" />
             </label>
-            <button type="submit">Enqueue</button>
+            <button type="submit" className="btn-collector" style={{ width: "100%" }}>
+              <span className="btn-collector-label">Enqueue</span>
+            </button>
           </form>
         </Card>
       </div>
@@ -131,8 +135,7 @@ export default function JobsPage() {
               const msg = j.result?.message || j.result?.error || j.result?.status || JSON.stringify(j.result).slice(0, 80);
               const licenseBlocked = j.result?.blockedByLicense;
               const authError =
-                typeof j.result?.error === "string" &&
-                (j.result.error.toLowerCase().includes("auth") || j.result.error.toLowerCase().includes("credential"));
+                typeof j.result?.error === "string" && (j.result.error.toLowerCase().includes("auth") || j.result.error.toLowerCase().includes("credential"));
               const timeout =
                 typeof j.result?.error === "string" &&
                 (j.result.error.toLowerCase().includes("timeout") || j.result.error.toLowerCase().includes("unreachable"));
@@ -144,16 +147,8 @@ export default function JobsPage() {
                       Licensing state
                     </a>
                   )}
-                  {authError && (
-                    <span style={{ color: "var(--muted)", fontSize: 12, marginLeft: 6 }}>
-                      Check profile credentials
-                    </span>
-                  )}
-                  {timeout && (
-                    <span style={{ color: "var(--muted)", fontSize: 12, marginLeft: 6 }}>
-                      Timeout/unreachable — verify IP/reachability
-                    </span>
-                  )}
+                  {authError && <span style={{ color: "var(--muted)", fontSize: 12, marginLeft: 6 }}>Check profile credentials</span>}
+                  {timeout && <span style={{ color: "var(--muted)", fontSize: 12, marginLeft: 6 }}>Timeout/unreachable — verify IP/reachability</span>}
                   <div style={{ fontSize: 12, color: "var(--muted)" }}>
                     <a href="/logs" style={{ color: "var(--accent)" }}>
                       View logs
@@ -168,11 +163,8 @@ export default function JobsPage() {
             header: "Actions",
             render: (j: Job) => (
               <div style={{ display: "flex", gap: 8 }}>
-                <button
-                  onClick={() => setSelectedJob(j)}
-                  style={{ background: "transparent", border: "1px solid var(--border)" }}
-                >
-                  Detail
+                <button className="btn-collector" onClick={() => setSelectedJob(j)}>
+                  <span className="btn-collector-label">Detail</span>
                 </button>
               </div>
             ),
@@ -182,15 +174,7 @@ export default function JobsPage() {
         empty="No jobs yet"
       />
 
-      {selectedJob && (
-        <JobDetailModal
-          job={selectedJob}
-          devices={devices}
-          profiles={profiles}
-          targets={targets}
-          onClose={() => setSelectedJob(null)}
-        />
-      )}
+      {selectedJob && <JobDetailModal job={selectedJob} devices={devices} profiles={profiles} targets={targets} onClose={() => setSelectedJob(null)} />}
     </div>
   );
 }
@@ -206,29 +190,14 @@ function categorizeJob(job: Job) {
   return { category: "other", text: res.error || res.message || job.status };
 }
 
-function JobDetailModal({
-  job,
-  devices,
-  profiles,
-  targets,
-  onClose,
-}: {
-  job: Job;
-  devices: any[];
-  profiles: any[];
-  targets: any[];
-  onClose: () => void;
-}) {
+function JobDetailModal({ job, devices, profiles, targets, onClose }: { job: Job; devices: any[]; profiles: any[]; targets: any[]; onClose: () => void }) {
   const target = targets.find((t) => t.id === job.targetId);
   const device = devices.find((d) => d.id === target?.deviceId);
   const profile = profiles.find((p) => p.id === target?.profileId);
   const res = job.result || {};
   const cat = categorizeJob(job);
 
-  const guidance: Record<
-    string,
-    { text: string; link?: string }
-  > = {
+  const guidance: Record<string, { text: string; link?: string }> = {
     licensing: { text: "Resolve entitlement in Licensing", link: "/licensing" },
     auth: { text: "Check profile credentials (Profiles) and Logs", link: "/profiles" },
     timeout: { text: "Verify device IP/reachability and Logs", link: "/logs" },
@@ -267,11 +236,7 @@ function JobDetailModal({
             <strong>Error snippet:</strong> <code style={{ fontSize: 12 }}>{res.error}</code>
           </div>
         )}
-        {res.blockedByLicense && (
-          <div style={{ color: "#fbbf24" }}>
-            License block: {res.code ?? "license_required"} — see Licensing.
-          </div>
-        )}
+        {res.blockedByLicense && <div style={{ color: "#fbbf24" }}>License block: {res.code ?? "license_required"} — see Licensing.</div>}
         <div>
           <strong>Next step:</strong>{" "}
           {guide.link ? (

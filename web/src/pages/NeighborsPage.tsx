@@ -171,25 +171,17 @@ export default function NeighborsPage() {
             header: "Actions",
             render: (n: Neighbor) => (
               <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <button style={{ background: "transparent", border: "1px solid var(--border)" }} onClick={() => openPromote(n)}>
-                  Promote
-                </button>
-                <button style={{ background: "transparent", border: "1px solid var(--border)" }} onClick={() => setLinkNeighbor(n)}>
-                  Link
-                </button>
+                <button className="btn-collector" onClick={() => openPromote(n)}><span className="btn-collector-label">Promote</span></button>
+                <button className="btn-collector" onClick={() => setLinkNeighbor(n)}><span className="btn-collector-label">Link</span></button>
                 {(n.promotedDeviceId || n.linkedDeviceId) && (
                   <span style={{ color: "var(--muted)", fontSize: 12 }}>
                     {n.promotedDeviceId ? `→ device ${n.promotedDeviceId}` : `→ device ${n.linkedDeviceId}`}
                   </span>
                 )}
                 {n.reviewStatus === "ignored" ? (
-                  <button style={{ background: "transparent", border: "1px solid var(--border)" }} onClick={() => unignore(n)}>
-                    Unignore
-                  </button>
+                  <button className="btn-collector" onClick={() => unignore(n)}><span className="btn-collector-label">Unignore</span></button>
                 ) : (
-                  <button style={{ background: "transparent", border: "1px solid var(--border)" }} onClick={() => setIgnoreNeighbor(n)}>
-                    Ignore
-                  </button>
+                  <button className="btn-collector" onClick={() => setIgnoreNeighbor(n)}><span className="btn-collector-label">Ignore</span></button>
                 )}
               </div>
             ),

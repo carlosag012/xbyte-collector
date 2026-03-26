@@ -66,10 +66,13 @@ export default function DashboardPage({ status, config, licensing, onRefresh }: 
     <div>
       <div className="page-header">
         <div>
-          <h1 className="page-title">Dashboard</h1>
+          <h1 className="page-title">
+            <span style={{ color: "white" }}>xMon | </span>
+            <span className="heading-gradient">Collector</span>
+          </h1>
           <p className="page-subtitle">Operational snapshot of the on-prem collector appliance.</p>
         </div>
-        <button onClick={onRefresh}>Refresh</button>
+        <button onClick={onRefresh} className="btn-topbar">Refresh</button>
       </div>
 
       <div className="cards">

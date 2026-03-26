@@ -16,7 +16,10 @@ export default function AppShell({ nav, user, onLogout, banner, children }: Prop
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">xbyte-collector</div>
+        <div className="brand">
+          <span className="text-white">xMon | </span>
+          <span className="heading-gradient">Collector</span>
+        </div>
         {nav.map((group) => (
           <div key={group.label} className="nav-section">
             <div className="nav-section-title">{group.label}</div>
@@ -37,9 +40,7 @@ export default function AppShell({ nav, user, onLogout, banner, children }: Prop
             <div style={{ fontWeight: 700 }}>Enterprise Appliance</div>
             <div style={{ color: "var(--muted)", fontSize: 13 }}>Manage collector, workers, and discovery data</div>
           </div>
-          <button onClick={onLogout} style={{ background: "#0f172a" }}>
-            Logout
-          </button>
+          <button onClick={onLogout} className="btn-topbar">Logout</button>
         </header>
         {banner && (
           <div style={{ padding: "12px 20px", background: "rgba(251, 191, 36, 0.18)", color: "#fbbf24" }}>

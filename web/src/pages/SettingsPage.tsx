@@ -53,7 +53,7 @@ export default function SettingsPage({ status: initialStatus, config: initialCon
     <div>
       <PageHeader title="Settings" subtitle="Appliance identity, bootstrap, and cloud sync." action={<button onClick={onReload}>Refresh</button>} />
 
-      <div className="cards">
+      <div className="cards" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))" }}>
         <Card title="Appliance Identity">
           <form onSubmit={saveConfig} className="form-grid">
             <label>

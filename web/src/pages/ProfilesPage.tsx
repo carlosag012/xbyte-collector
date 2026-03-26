@@ -193,11 +193,13 @@ export default function ProfilesPage() {
                 )}
               </>
             )}
-            <div style={{ display: "flex", gap: 8 }}>
-              <button type="submit">{editing ? "Update" : "Create"}</button>
+            <div style={{ display: "flex", gap: 8, flexDirection: "column" }}>
+              <button type="submit" className="btn-collector" style={{ width: "100%" }}>
+                <span className="btn-collector-label">{editing ? "Update" : "Create Profile"}</span>
+              </button>
               {editing && (
-                <button type="button" onClick={() => setEditing(null)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  Cancel
+                <button type="button" className="btn-collector" onClick={() => setEditing(null)}>
+                  <span className="btn-collector-label">Cancel</span>
                 </button>
               )}
             </div>
@@ -221,15 +223,9 @@ export default function ProfilesPage() {
             header: "Actions",
             render: (p: Profile) => (
               <div style={{ display: "flex", gap: 8 }}>
-                <button onClick={() => setEditing(p)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  Edit
-                </button>
-                <button onClick={() => toggle(p)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  {p.enabled ? "Disable" : "Enable"}
-                </button>
-                <button onClick={() => openHistory(p)} style={{ background: "transparent", border: "1px solid var(--border)" }}>
-                  History
-                </button>
+                <button className="btn-collector" onClick={() => setEditing(p)}><span className="btn-collector-label">Edit</span></button>
+                <button className="btn-collector" onClick={() => toggle(p)}><span className="btn-collector-label">{p.enabled ? "Disable" : "Enable"}</span></button>
+                <button className="btn-collector" onClick={() => openHistory(p)}><span className="btn-collector-label">History</span></button>
               </div>
             ),
           },
