@@ -121,8 +121,9 @@ export default function TargetsPage() {
       />
 
       <div className="cards" style={{ marginBottom: 16 }}>
-        <Card title="Create Target">
-          <form onSubmit={createTarget} className="form-grid" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))" }}>
+        <div style={{ maxWidth: 720, width: "100%" }}>
+          <Card title="Create Target">
+            <form onSubmit={createTarget} className="form-grid" style={{ gridTemplateColumns: "1fr", gap: 12, minWidth: 0 }}>
             <label>
               <span>Device</span>
               <select value={form.deviceId} onChange={(e) => setForm((f) => ({ ...f, deviceId: e.target.value ? Number(e.target.value) : "" }))}>
@@ -133,7 +134,7 @@ export default function TargetsPage() {
                   </option>
                 ))}
               </select>
-              <small style={{ color: "var(--muted)" }}>Choose the managed device that should be polled.</small>
+              <small style={{ color: "var(--muted)", display: "block", marginTop: 4 }}>Choose the managed device that should be polled.</small>
             </label>
             <label>
               <span>Profile</span>
@@ -148,14 +149,15 @@ export default function TargetsPage() {
                   </option>
                 ))}
               </select>
-              <small style={{ color: "var(--muted)" }}>Pick a ping or SNMP profile appropriate for this device.</small>
+              <small style={{ color: "var(--muted)", display: "block", marginTop: 4 }}>Pick a ping or SNMP profile appropriate for this device.</small>
               </label>
               <button type="submit" className="btn-collector" style={{ width: "100%" }}><span className="btn-collector-label">Create Target</span></button>
-              <small style={{ color: "var(--muted)" }}>
+              <small style={{ color: "var(--muted)", display: "block", marginTop: 4 }}>
                 After creation: enqueue a poll to verify connectivity. Use Jobs/Logs for troubleshooting.
               </small>
-          </form>
-        </Card>
+            </form>
+          </Card>
+        </div>
       </div>
 
       <Table

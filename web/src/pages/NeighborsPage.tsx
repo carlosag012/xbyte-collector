@@ -170,13 +170,8 @@ export default function NeighborsPage() {
             key: "actions",
             header: "Actions",
             render: (n: Neighbor) => (
-              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                <button
-                  className={(n.reviewStatus ?? "new") === "new" ? "btn-collector" : "btn-secondary"}
-                  onClick={() => openPromote(n)}
-                >
-                  {(n.reviewStatus ?? "new") === "new" ? <span className="btn-collector-label">Promote</span> : "Promote"}
-                </button>
+              <div style={{ display: "flex", gap: 6, flexWrap: "nowrap", whiteSpace: "nowrap", alignItems: "center", overflowX: "auto" }}>
+                <button className="btn-secondary" onClick={() => openPromote(n)}>Promote</button>
                 <button className="btn-secondary" onClick={() => setLinkNeighbor(n)}>Link</button>
                 {(n.promotedDeviceId || n.linkedDeviceId) && (
                   <span style={{ color: "var(--muted)", fontSize: 12 }}>
