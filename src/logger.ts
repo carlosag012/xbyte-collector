@@ -1,3 +1,6 @@
+import { appendFileSync, existsSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
+
 type Level = "fatal" | "error" | "warn" | "info" | "debug" | "trace";
 
 function shouldLog(level: Level, current: Level): boolean {
@@ -6,7 +9,12 @@ function shouldLog(level: Level, current: Level): boolean {
 }
 
 export class Logger {
-  constructor(private level: Level = "info") {}
+  private logPath: string;
+
+  constructor(private level: Level = "info", logDir = join(process.cwd(), "var", "logs"), filename = "xbyte-collector.log") {
+    if (!existsSync(logDir)) mkdirSync(logDir, { recursive: true });
+    this.logPath = join(logDir, filename);
+  }
 
   log(level: Level, msg: string, meta?: Record<string, unknown>) {
     if (!shouldLog(level, this.level)) return;
@@ -16,6 +24,12 @@ export class Logger {
       time: new Date().toISOString(),
       ...(meta ? { meta } : {}),
     };
+    const line = `${entry.time} ${JSON.stringify(entry)}\n`;
+    try {
+      appendFileSync(this.logPath, line, "utf8");
+    } catch {
+      // swallow file write errors to avoid crashing; still attempt console
+    }
     console.log(JSON.stringify(entry));
   }
 

@@ -113,17 +113,20 @@ import { hashPassword, verifyPassword } from "./passwords.js";
 import { authenticateLocalUser } from "./auth-service.js";
 import { issueSession, clearSession, readValidSession } from "./session-service.js";
 import { getUserById } from "./db.js";
+import { Logger } from "./logger.js";
 
 const config = loadConfig();
 let dbInitFailed = false;
 let db: DB | null = null;
 const distDir = resolve("web", "dist");
 const distIndexPath = join(distDir, "index.html");
+const logger = new Logger(config.logLevel ?? "info");
 
 try {
   db = initDatabase(config);
   syncConfigFromDb(db);
   syncBootstrapFromDb(db);
+  logger.info("server_start", { pid: process.pid });
 } catch (err: any) {
   console.error(
     JSON.stringify({
@@ -134,6 +137,7 @@ try {
       time: new Date().toISOString(),
     })
   );
+  logger.error("sqlite init failed", { error: err?.message ?? String(err), path: config.sqlitePath });
   dbInitFailed = true;
 }
 
@@ -2117,17 +2121,20 @@ const server = createServer((req, res) => {
         if (!target) {
           res.writeHead(404);
           res.end(JSON.stringify({ ok: false, error: "target_not_found" }));
+          logger.warn("enqueue target not found", { targetId: body.targetId });
           return;
         }
         if (!target.enabled) {
           res.writeHead(400);
           res.end(JSON.stringify({ ok: false, error: "target_disabled" }));
+          logger.warn("enqueue target disabled", { targetId: target.id });
           return;
         }
         const lic = licenseAllowsCollection(db);
         if (!lic.allowed) {
           res.writeHead(403);
           res.end(JSON.stringify({ ok: false, error: lic.reason ?? "license_required" }));
+          logger.warn("enqueue blocked by license", { targetId: target.id, reason: lic.reason ?? "license_required" });
           return;
         }
         const job = enqueuePollJobForTarget(db, target.id);
@@ -2138,6 +2145,7 @@ const server = createServer((req, res) => {
               actor: currentUsernameFromRequest(db, req),
               after: { jobId: job.id },
             });
+            logger.info("enqueue manual", { targetId: target.id, jobId: job.id });
             res.writeHead(200);
             res.end(JSON.stringify({ ok: true, job }));
             return;
@@ -2152,11 +2160,12 @@ const server = createServer((req, res) => {
           res.writeHead(500);
           res.end(JSON.stringify({ ok: false, error: "db_error" }));
         }
-      })
-      .catch(() => {
-        res.writeHead(400);
-        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
-      });
+    })
+    .catch(() => {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      logger.warn("enqueue invalid json");
+    });
     return;
   }
 

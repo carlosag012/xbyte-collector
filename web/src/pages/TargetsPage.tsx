@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Card, PageHeader, Pill, Table } from "../components/UI";
+import { Card, PageHeader, Pill, Table, useToast } from "../components/UI";
 import { Modal } from "../components/Modal";
 
 type Device = { id: number; hostname: string };
@@ -16,6 +16,7 @@ export default function TargetsPage() {
   const [relations, setRelations] = useState<Record<number, string>>({});
   const [history, setHistory] = useState<any[]>([]);
   const [historyFor, setHistoryFor] = useState<Target | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     loadAll();
@@ -62,6 +63,10 @@ export default function TargetsPage() {
     if (res.ok) {
       setForm({ deviceId: "", profileId: "" });
       await loadAll();
+      toast({ message: "Target created", tone: "success" });
+    } else {
+      const data = await res.json().catch(() => ({}));
+      toast({ message: data.message || data.error || "Create target failed", tone: "error" });
     }
   }
 
@@ -85,12 +90,23 @@ export default function TargetsPage() {
   }
 
   async function enqueue(target: Target) {
-    await fetch("/api/poll-jobs/enqueue", {
+    const res = await fetch("/api/poll-jobs/enqueue", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ targetId: target.id }),
     });
+    if (res.ok) {
+      toast({ message: "Enqueued poll job", tone: "success" });
+    } else {
+      const data = await res.json().catch(() => ({}));
+      const code = data.code || data.error;
+      if (code && typeof code === "string" && code.toLowerCase().includes("license")) {
+        toast({ message: "Enqueue blocked: active xByte license and paid subscription required.", tone: "error" });
+      } else {
+        toast({ message: data.message || data.error || "Failed to enqueue", tone: "error" });
+      }
+    }
   }
 
   return (
@@ -120,44 +136,50 @@ export default function TargetsPage() {
         }
       />
 
-      <div className="cards" style={{ marginBottom: 16 }}>
-        <div style={{ maxWidth: 720, width: "100%" }}>
-          <Card title="Create Target">
-            <form onSubmit={createTarget} className="form-grid" style={{ gridTemplateColumns: "1fr", gap: 12, minWidth: 0 }}>
-            <label>
-              <span>Device</span>
-              <select value={form.deviceId} onChange={(e) => setForm((f) => ({ ...f, deviceId: e.target.value ? Number(e.target.value) : "" }))}>
-                <option value="">Select device</option>
-                {devices.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.hostname}
-                  </option>
-                ))}
-              </select>
-              <small style={{ color: "var(--muted)", display: "block", marginTop: 4 }}>Choose the managed device that should be polled.</small>
-            </label>
-            <label>
-              <span>Profile</span>
-              <select
-                value={form.profileId}
-                onChange={(e) => setForm((f) => ({ ...f, profileId: e.target.value ? Number(e.target.value) : "" }))}
-              >
-                <option value="">Select profile</option>
-                {profiles.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.kind})
-                  </option>
-                ))}
-              </select>
-              <small style={{ color: "var(--muted)", display: "block", marginTop: 4 }}>Pick a ping or SNMP profile appropriate for this device.</small>
-              </label>
-              <button type="submit" className="btn-collector" style={{ width: "100%" }}><span className="btn-collector-label">Create Target</span></button>
-              <small style={{ color: "var(--muted)", display: "block", marginTop: 4 }}>
-                After creation: enqueue a poll to verify connectivity. Use Jobs/Logs for troubleshooting.
-              </small>
+      <div className="cards cards-full" style={{ marginBottom: 16 }}>
+        <Card title="Create Target">
+          <div className="form-row">
+            <form onSubmit={createTarget} className="form-panel">
+              <div className="form-fields form-fields-single">
+                <label>
+                  <span>Device</span>
+                  <select value={form.deviceId} onChange={(e) => setForm((f) => ({ ...f, deviceId: e.target.value ? Number(e.target.value) : "" }))}>
+                    <option value="">Select device</option>
+                    {devices.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.hostname}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Profile</span>
+                  <select
+                    value={form.profileId}
+                    onChange={(e) => setForm((f) => ({ ...f, profileId: e.target.value ? Number(e.target.value) : "" }))}
+                  >
+                    <option value="">Select profile</option>
+                    {profiles.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name} ({p.kind})
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <div className="form-actions" style={{ display: "flex", gap: 8, flexDirection: "column", maxWidth: 420 }}>
+                  <button type="submit" className="btn-collector">
+                    <span className="btn-collector-label">Create Target</span>
+                  </button>
+                </div>
+              </div>
             </form>
-          </Card>
-        </div>
+            <div className="about-panel">
+              <strong>About targets</strong>
+              <p style={{ marginTop: 6 }}>Targets link devices to poll profiles. Enable a target, then enqueue a poll to verify connectivity.</p>
+              <p style={{ marginTop: 6 }}>Use jobs/logs for troubleshooting if a poll fails.</p>
+            </div>
+          </div>
+        </Card>
       </div>
 
       <Table

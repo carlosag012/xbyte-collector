@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { PageHeader, Table, Pill } from "../components/UI";
 import { Modal } from "../components/Modal";
+import { useToast } from "../components/UI";
 
 type Device = { id: number; hostname: string };
 type Neighbor = {
@@ -29,6 +30,7 @@ export default function NeighborsPage() {
   const [linkDeviceId, setLinkDeviceId] = useState<number | "">("");
   const [ignoreNeighbor, setIgnoreNeighbor] = useState<Neighbor | null>(null);
   const [ignoreNote, setIgnoreNote] = useState("");
+  const toast = useToast();
 
   useEffect(() => {
     load();
@@ -60,9 +62,7 @@ export default function NeighborsPage() {
 
   function statusChip(s?: string) {
     const state = s ?? "new";
-    const color =
-      state === "promoted" ? "#22c55e" : state === "linked" ? "#38bdf8" : state === "ignored" ? "#f97316" : "#e5e7eb";
-    return <Pill status={state} styleOverride={{ color }} />;
+    return <Pill status={state} />;
   }
 
   function openPromote(n: Neighbor) {
@@ -77,7 +77,7 @@ export default function NeighborsPage() {
   async function submitPromote(e: React.FormEvent) {
     e.preventDefault();
     if (!promoteNeighbor) return;
-    await fetch("/api/neighbors/promote", {
+    const res = await fetch("/api/neighbors/promote", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
@@ -88,46 +88,70 @@ export default function NeighborsPage() {
         note: promoteForm.note || undefined,
       }),
     });
-    setPromoteNeighbor(null);
-    await load();
+    if (res.ok) {
+      toast({ message: "Neighbor promoted to device", tone: "success" });
+      setPromoteNeighbor(null);
+      await load();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      toast({ message: data.message || data.error || "Promote failed", tone: "error" });
+    }
   }
 
   async function submitLink(e: React.FormEvent) {
     e.preventDefault();
     if (!linkNeighbor || !linkDeviceId) return;
-    await fetch("/api/neighbors/link", {
+    const res = await fetch("/api/neighbors/link", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ neighborId: linkNeighbor.id, deviceId: linkDeviceId }),
     });
-    setLinkNeighbor(null);
-    setLinkDeviceId("");
-    await load();
+    if (res.ok) {
+      toast({ message: "Neighbor linked to device", tone: "success" });
+      setLinkNeighbor(null);
+      setLinkDeviceId("");
+      await load();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      toast({ message: data.message || data.error || "Link failed", tone: "error" });
+    }
   }
 
   async function submitIgnore(e: React.FormEvent) {
     e.preventDefault();
     if (!ignoreNeighbor) return;
-    await fetch("/api/neighbors/ignore", {
+    const res = await fetch("/api/neighbors/ignore", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ neighborId: ignoreNeighbor.id, note: ignoreNote || undefined }),
     });
-    setIgnoreNeighbor(null);
-    setIgnoreNote("");
-    await load();
+    if (res.ok) {
+      toast({ message: "Neighbor ignored", tone: "warning" });
+      setIgnoreNeighbor(null);
+      setIgnoreNote("");
+      await load();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      toast({ message: data.message || data.error || "Ignore failed", tone: "error" });
+    }
   }
 
   async function unignore(n: Neighbor) {
-    await fetch("/api/neighbors/unignore", {
+    const res = await fetch("/api/neighbors/unignore", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ neighborId: n.id }),
     });
-    await load();
+    if (res.ok) {
+      toast({ message: "Neighbor unignored", tone: "success" });
+      await load();
+    } else {
+      const data = await res.json().catch(() => ({}));
+      toast({ message: data.message || data.error || "Unignore failed", tone: "error" });
+    }
   }
 
   return (

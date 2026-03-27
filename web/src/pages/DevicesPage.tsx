@@ -219,38 +219,50 @@ export default function DevicesPage() {
         action={<input placeholder="Search hostname or IP" value={search} onChange={(e) => setSearch(e.target.value)} style={{ width: 220 }} />}
       />
 
-      <div className="cards" style={{ marginBottom: 16 }}>
+      <div className="cards cards-full" style={{ marginBottom: 16 }}>
         <Card title={editing ? "Edit Device" : "Add Device"}>
-          <form onSubmit={submitDevice} className="form-grid">
-            <label>
-              <span>Hostname</span>
-              <input value={form.hostname} onChange={(e) => setForm({ ...form, hostname: e.target.value })} required />
-            </label>
-            <label>
-              <span>IP Address</span>
-              <input value={form.ipAddress} onChange={(e) => setForm({ ...form, ipAddress: e.target.value })} required />
-            </label>
-            <label>
-              <span>Site</span>
-              <input value={form.site} onChange={(e) => setForm({ ...form, site: e.target.value })} />
-            </label>
-            <label>
-              <span>Org</span>
-              <input value={form.org} onChange={(e) => setForm({ ...form, org: e.target.value })} />
-            </label>
-            <div style={{ display: "flex", gap: 8, flexDirection: "column" }}>
-              <button type="submit" className="btn-collector" style={{ width: "100%" }}>
-                - <span className="btn-collector-label">{editing ? "Update" : "Create Device"}</span>
-              </button>
-              {editing && (
-                <button type="button" className="btn-secondary" onClick={() => setEditing(null)}>
-                  Cancel
+          <div className="form-row">
+            <form onSubmit={submitDevice} className="form-panel">
+              <div className="form-columns">
+                <div className="form-col">
+                  <label>
+                    <span>Hostname</span>
+                    <input value={form.hostname} onChange={(e) => setForm({ ...form, hostname: e.target.value })} required />
+                  </label>
+                  <label>
+                    <span>IP Address</span>
+                    <input value={form.ipAddress} onChange={(e) => setForm({ ...form, ipAddress: e.target.value })} required />
+                  </label>
+                </div>
+                <div className="form-col">
+                  <label>
+                    <span>Site</span>
+                    <input value={form.site} onChange={(e) => setForm({ ...form, site: e.target.value })} />
+                  </label>
+                  <label>
+                    <span>Org</span>
+                    <input value={form.org} onChange={(e) => setForm({ ...form, org: e.target.value })} />
+                  </label>
+                </div>
+              </div>
+              <div className="form-actions" style={{ display: "flex", gap: 8, flexDirection: "column", maxWidth: 420 }}>
+                <button type="submit" className="btn-collector">
+                  <span className="btn-collector-label">{editing ? "Update" : "Create Device"}</span>
                 </button>
-              )}
+                {editing && (
+                  <button type="button" className="btn-secondary" onClick={() => setEditing(null)}>
+                    Cancel
+                  </button>
+                )}
+              </div>
+              {formError && <p style={{ color: "#f87171", margin: "6px 0 0 0" }}>{formError}</p>}
+            </form>
+            <div className="about-panel">
+              <strong>About devices</strong>
+              <p style={{ marginTop: 6 }}>Devices are the managed assets. Add hostname and IP, then attach a poll profile/target to start collection.</p>
+              <p style={{ marginTop: 6 }}>After saving, enqueue a poll from Targets or Jobs to verify connectivity.</p>
             </div>
-            <small style={{ color: "var(--muted)" }}>Next step: attach a poll profile to this device and enqueue a first poll.</small>
-            {formError && <p style={{ color: "#f87171", margin: "6px 0 0 0" }}>{formError}</p>}
-          </form>
+          </div>
         </Card>
       </div>
 

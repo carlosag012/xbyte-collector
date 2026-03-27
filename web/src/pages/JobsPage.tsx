@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card, PageHeader, Pill, Table } from "../components/UI";
 import { Modal } from "../components/Modal";
+import { useToast } from "../components/UI";
 
 type Job = {
   id: number;
@@ -14,7 +15,9 @@ type Job = {
   result: any;
 };
 
-export default function JobsPage() {
+type Licensing = { allowed?: boolean; status?: string; subscriptionStatus?: string };
+
+export default function JobsPage({ licensing }: { licensing?: Licensing }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [targets, setTargets] = useState<any[]>([]);
   const [devices, setDevices] = useState<any[]>([]);
@@ -23,6 +26,7 @@ export default function JobsPage() {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [targetId, setTargetId] = useState<string>("");
   const [selectedJob, setSelectedJob] = useState<Job | null>(null);
+  const toast = useToast();
 
   useEffect(() => {
     load();
@@ -52,17 +56,56 @@ export default function JobsPage() {
     }
   }
 
-  async function enqueue(e: React.FormEvent) {
+  async function enqueue(e: React.FormEvent<HTMLFormElement | HTMLButtonElement>) {
     e.preventDefault();
     if (!targetId) return;
-    await fetch("/api/poll-jobs/enqueue", {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ targetId: Number(targetId) }),
-    });
-    await load();
+    const licMsg = licensingBlockMessage(licensing);
+    if (licMsg) {
+      toast({ message: licMsg, tone: "error" });
+      return;
+    }
+    try {
+      const res = await fetch("/api/poll-jobs/enqueue", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ targetId: Number(targetId) }),
+      });
+      if (res.ok) {
+        toast({ message: "Enqueued poll job", tone: "success" });
+        await load();
+        setTargetId("");
+      } else {
+        const data = await res.json().catch(() => ({}));
+        const code = (data.code || data.error || "").toLowerCase();
+        const message =
+          licensingBlockMessage(licensing) ||
+          (code.includes("license") ? "Enqueue blocked: active xByte license and paid subscription required." : data.message || data.error) ||
+          "Enqueue failed due to a server error.";
+        toast({ message, tone: "error" });
+      }
+    } catch (err: any) {
+      toast({ message: err?.message || "Failed to enqueue", tone: "error" });
+    }
   }
+
+function licensingBlockMessage(licensing?: Licensing) {
+  if (!licensing) return "";
+  if (licensing.allowed === false) {
+    const status = (licensing.status || licensing.subscriptionStatus || "").toLowerCase();
+    if (status.includes("inactive") || status.includes("subscription")) {
+      return "Enqueue blocked: paid subscription required. Please renew or upgrade your subscription.";
+    }
+    if (status.includes("expired")) {
+      return "Enqueue blocked: license expired. Please renew your xByte license.";
+    }
+    if (status.includes("revoked") || status.includes("invalid")) {
+      return "Enqueue blocked: license revoked/invalid. Please contact xByte support.";
+    }
+    return "Enqueue blocked: active xByte license and paid subscription required.";
+  }
+  return "";
+}
 
   return (
     <div>
@@ -85,17 +128,28 @@ export default function JobsPage() {
         }
       />
 
-      <div className="cards" style={{ marginBottom: 16 }}>
+      <div className="cards cards-full" style={{ marginBottom: 16 }}>
         <Card title="Manual enqueue">
-          <form onSubmit={enqueue} className="form-grid">
-            <label>
-              <span>Target ID</span>
-              <input value={targetId} onChange={(e) => setTargetId(e.target.value)} placeholder="e.g. 3" />
-            </label>
-            <button type="submit" className="btn-collector" style={{ width: "100%" }}>
-              <span className="btn-collector-label">Enqueue</span>
-            </button>
-          </form>
+          <div className="form-row">
+            <form onSubmit={enqueue} className="form-panel">
+              <div className="form-fields form-fields-single">
+                <label>
+                  <span>Target ID</span>
+                  <input value={targetId} onChange={(e) => setTargetId(e.target.value)} placeholder="e.g. 3" />
+                </label>
+                <div className="form-actions" style={{ display: "flex", gap: 8, flexDirection: "column", maxWidth: 320 }}>
+                  <button type="submit" className="btn-collector">
+                    <span className="btn-collector-label">Enqueue</span>
+                  </button>
+                </div>
+              </div>
+            </form>
+            <div className="about-panel">
+              <strong>What is enqueue?</strong>
+              <p style={{ marginTop: 6 }}>Creates a manual poll job for the chosen target. Use this to test connectivity or force an immediate collection.</p>
+              <p style={{ marginTop: 6 }}>Targets map a device to a profile; make sure the target exists and is enabled.</p>
+            </div>
+          </div>
         </Card>
       </div>
 

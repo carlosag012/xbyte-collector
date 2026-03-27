@@ -105,32 +105,41 @@ export default function ProfilesPage() {
     <div>
       <PageHeader title="Poll Profiles" subtitle="Configure ping and SNMP profiles used by targets." />
 
-      <div className="cards" style={{ marginBottom: 16 }}>
+      <div className="cards cards-full" style={{ marginBottom: 16 }}>
         <Card title={editing ? "Edit Profile" : "Create Profile"}>
-          <form onSubmit={submit} className="form-grid">
-            <label>
-              <span>Kind</span>
-              <select value={form.kind} onChange={(e) => updateForm("kind", e.target.value as any)}>
-                <option value="ping">Ping</option>
-                <option value="snmp">SNMP</option>
-              </select>
-            </label>
-            <label>
-              <span>Name</span>
-              <input value={form.name ?? ""} onChange={(e) => updateForm("name", e.target.value)} required />
-            </label>
-            <label>
-              <span>Interval (sec)</span>
-              <input type="number" value={form.intervalSec ?? 300} onChange={(e) => updateForm("intervalSec", Number(e.target.value))} />
-            </label>
-            <label>
-              <span>Timeout (ms)</span>
-              <input type="number" value={form.timeoutMs ?? 2000} onChange={(e) => updateForm("timeoutMs", Number(e.target.value))} />
-            </label>
-            <label>
-              <span>Retries</span>
-              <input type="number" value={form.retries ?? 1} onChange={(e) => updateForm("retries", Number(e.target.value))} />
-            </label>
+          <div className="form-row">
+            <form onSubmit={submit} className="form-panel">
+              <div className="form-columns">
+                <div className="form-col">
+                  <label>
+                    <span>Kind</span>
+                    <select value={form.kind} onChange={(e) => updateForm("kind", e.target.value as any)}>
+                      <option value="ping">Ping</option>
+                      <option value="snmp">SNMP</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span>Timeout (ms)</span>
+                    <input type="number" value={form.timeoutMs ?? 2000} onChange={(e) => updateForm("timeoutMs", Number(e.target.value))} />
+                  </label>
+                </div>
+                <div className="form-col">
+                  <label>
+                    <span>Name</span>
+                    <input value={form.name ?? ""} onChange={(e) => updateForm("name", e.target.value)} required />
+                  </label>
+                  <label>
+                    <span>Retries</span>
+                    <input type="number" value={form.retries ?? 1} onChange={(e) => updateForm("retries", Number(e.target.value))} />
+                  </label>
+                </div>
+                <div className="form-col" style={{ gridColumn: "1 / -1" }}>
+                  <label>
+                    <span>Interval (sec)</span>
+                    <input type="number" value={form.intervalSec ?? 300} onChange={(e) => updateForm("intervalSec", Number(e.target.value))} />
+                  </label>
+                </div>
+              </div>
             {form.kind === "snmp" && (
               <>
                 <label>
@@ -193,21 +202,24 @@ export default function ProfilesPage() {
                 )}
               </>
             )}
-            <div style={{ display: "flex", gap: 8, flexDirection: "column" }}>
-              <button type="submit" className="btn-collector" style={{ width: "100%" }}>
-                <span className="btn-collector-label">{editing ? "Update" : "Create Profile"}</span>
-              </button>
-              {editing && (
-                <button type="button" className="btn-collector" onClick={() => setEditing(null)}>
-                  <span className="btn-collector-label">Cancel</span>
+              <div className="form-actions" style={{ display: "flex", gap: 8, flexDirection: "column", maxWidth: 420 }}>
+                <button type="submit" className="btn-collector">
+                  <span className="btn-collector-label">{editing ? "Update" : "Create Profile"}</span>
                 </button>
-              )}
+                {editing && (
+                  <button type="button" className="btn-secondary" onClick={() => setEditing(null)}>
+                    Cancel
+                  </button>
+                )}
+              </div>
+              {formError && <p style={{ color: "#f87171", margin: "6px 0 0 0" }}>{formError}</p>}
+            </form>
+            <div className="about-panel">
+              <strong>About profiles</strong>
+              <p style={{ marginTop: 6 }}>Profiles define how devices are polled. Use ping for reachability; SNMP needs the correct community or v3 credentials.</p>
+              <p style={{ marginTop: 6 }}>Attach profiles to targets, then enqueue a poll to verify connectivity.</p>
             </div>
-            <small style={{ color: "var(--muted)" }}>
-              Tip: Use ping for reachability; SNMP profiles need the correct community or v3 credentials. Targets attach profiles to devices.
-            </small>
-            {formError && <p style={{ color: "#f87171", margin: "6px 0 0 0" }}>{formError}</p>}
-          </form>
+          </div>
         </Card>
       </div>
 

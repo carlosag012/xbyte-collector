@@ -19,6 +19,7 @@ import BackupsPage from "./pages/BackupsPage";
 import UpdatesPage from "./pages/UpdatesPage";
 import AccessPage from "./pages/AccessPage";
 import AuditPage from "./pages/AuditPage";
+import { ToastProvider } from "./components/UI";
 
 type User = { id: number; username: string; role: string; isActive: boolean };
 type Status = {
@@ -191,33 +192,41 @@ export default function App() {
   const restricted = licensing && licensing.allowed === false;
 
   return (
-    <AppShell nav={nav} user={user} onLogout={handleLogout} currentPath={location.pathname} banner={restricted ? "Appliance restricted: valid license and active subscription required. Polling is disabled." : undefined}>
-      <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="/dashboard" element={<DashboardPage status={status} config={config} licensing={licensing} onRefresh={loadAuthenticatedData} />} />
-        <Route path="/devices" element={<DevicesPage />} />
-        <Route path="/profiles" element={<ProfilesPage />} />
-        <Route path="/targets" element={<TargetsPage />} />
-        <Route path="/jobs" element={<JobsPage />} />
-        <Route path="/neighbors" element={<NeighborsPage />} />
-        <Route path="/system" element={<SystemPage />} />
-        <Route path="/services" element={<ServicesPage />} />
-        <Route path="/workers" element={<WorkersPage />} />
-        <Route path="/settings" element={<SettingsPage status={status} config={config} onReload={loadAuthenticatedData} />} />
-        <Route path="/logs" element={<LogsPage />} />
-        <Route path="/backups" element={<BackupsPage />} />
-        <Route path="/updates" element={<UpdatesPage />} />
-        <Route path="/access" element={<AccessPage user={user} />} />
-        <Route path="/audit" element={<AuditPage />} />
-        <Route path="/about" element={<AboutPage />} />
-        <Route path="/licensing" element={<LicensingPage />} />
-        <Route path="*" element={<Navigate to="/dashboard" replace />} />
-      </Routes>
-      {error && (
-        <div style={{ padding: "12px 16px", background: "#fee2e2", color: "#b91c1c", borderRadius: 12, margin: "16px 20px" }}>
-          {error}
-        </div>
-      )}
-    </AppShell>
+    <ToastProvider>
+      <AppShell
+        nav={nav}
+        user={user}
+        onLogout={handleLogout}
+        currentPath={location.pathname}
+        banner={restricted ? "Appliance restricted: valid license and active subscription required. Polling is disabled." : undefined}
+      >
+        <Routes>
+          <Route path="/" element={<Navigate to="/dashboard" replace />} />
+          <Route path="/dashboard" element={<DashboardPage status={status} config={config} licensing={licensing} onRefresh={loadAuthenticatedData} />} />
+          <Route path="/devices" element={<DevicesPage />} />
+          <Route path="/profiles" element={<ProfilesPage />} />
+          <Route path="/targets" element={<TargetsPage />} />
+          <Route path="/jobs" element={<JobsPage licensing={licensing} />} />
+          <Route path="/neighbors" element={<NeighborsPage />} />
+          <Route path="/system" element={<SystemPage />} />
+          <Route path="/services" element={<ServicesPage />} />
+          <Route path="/workers" element={<WorkersPage />} />
+          <Route path="/settings" element={<SettingsPage status={status} config={config} onReload={loadAuthenticatedData} />} />
+          <Route path="/logs" element={<LogsPage />} />
+          <Route path="/backups" element={<BackupsPage />} />
+          <Route path="/updates" element={<UpdatesPage />} />
+          <Route path="/access" element={<AccessPage user={user} />} />
+          <Route path="/audit" element={<AuditPage />} />
+          <Route path="/about" element={<AboutPage />} />
+          <Route path="/licensing" element={<LicensingPage />} />
+          <Route path="*" element={<Navigate to="/dashboard" replace />} />
+        </Routes>
+        {error && (
+          <div style={{ padding: "12px 16px", background: "#fee2e2", color: "#b91c1c", borderRadius: 12, margin: "16px 20px" }}>
+            {error}
+          </div>
+        )}
+      </AppShell>
+    </ToastProvider>
   );
 }
