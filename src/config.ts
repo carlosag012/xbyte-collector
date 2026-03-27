@@ -28,6 +28,7 @@ const EnvSchema = z
     WORKER_RESTART_DELAY_MS: z.coerce.number().int().positive().optional(),
     WORKER_MAX_RESTARTS_PER_WINDOW: z.coerce.number().int().positive().optional(),
     WORKER_RESTART_WINDOW_MS: z.coerce.number().int().positive().optional(),
+    LOG_LEVEL: z.string().optional(),
   })
   .transform((v) => ({
     nodeEnv: v.NODE_ENV,
@@ -56,6 +57,7 @@ const EnvSchema = z
     workerRestartDelayMs: v.WORKER_RESTART_DELAY_MS ?? 2000,
     workerMaxRestartsPerWindow: v.WORKER_MAX_RESTARTS_PER_WINDOW ?? 10,
     workerRestartWindowMs: v.WORKER_RESTART_WINDOW_MS ?? 60000,
+    logLevel: (v.LOG_LEVEL ?? "info") as any,
   }));
 
 export type AppConfig = z.infer<typeof EnvSchema>;
