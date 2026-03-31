@@ -23,6 +23,23 @@ export type CloudAuthState = {
   lastCheckedAt: string | null;
 };
 
+export type ApplianceActivateResponse = {
+  ok: boolean;
+  orgId?: string;
+  collectorId?: string;
+  apiKey?: string | null;
+  apiKeyIssued?: boolean;
+  apiBase?: string | null;
+  authorized?: boolean;
+  collectionAllowed?: boolean;
+  licenseStatus?: string | null;
+  effectiveUntil?: string | null;
+  reason?: string | null;
+  collectorLimit?: number | null;
+  activeCollectorCount?: number;
+  error?: string;
+};
+
 async function doFetch(url: string, opts: RequestInit) {
   const res = await fetch(url, {
     ...opts,
@@ -100,6 +117,15 @@ export async function sendPing(cfg: AppConfig): Promise<{ state: CloudAuthState;
       lastCheckedAt: new Date().toISOString(),
     },
   };
+}
+
+export async function activateAppliance(apiBase: string, payload: { licenseKey: string; hostname?: string; fingerprint?: string; applianceName?: string }) {
+  const res = await doFetch(`${apiBase.replace(/\/+$/, "")}/appliance/activate`, {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  const body = (await res.json().catch(() => ({}))) as ApplianceActivateResponse;
+  return { status: res.status, body };
 }
 
 export async function fetchCollectorConfig(cfg: AppConfig): Promise<{ config: any | null; retryAfterSec?: number }> {

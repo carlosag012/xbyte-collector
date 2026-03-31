@@ -115,7 +115,7 @@ import { issueSession, clearSession, readValidSession } from "./session-service.
 import { getUserById } from "./db.js";
 import { Logger } from "./logger.js";
 import { startCollectorCloudBridge } from "./collector-cloud-service.js";
-import { sendPing } from "./xmon-client.js";
+import { sendPing, activateAppliance } from "./xmon-client.js";
 
 const config = loadConfig();
 let dbInitFailed = false;
@@ -1469,7 +1469,7 @@ const server = createServer((req, res) => {
 
   if (method === "POST" && url === "/api/licensing/activate") {
     readJsonBody<any>(req)
-      .then((body) => {
+      .then(async (body) => {
         if (!body || typeof body.licenseKey !== "string" || !body.licenseKey.trim()) {
           res.writeHead(400);
           res.end(JSON.stringify({ ok: false, error: "invalid_license_payload" }));
@@ -1477,10 +1477,11 @@ const server = createServer((req, res) => {
         }
         try {
           if (!db) throw new Error("db missing");
+          const licenseKey = body.licenseKey.trim();
           const state = setLicenseState(db, {
             status: "active",
-            subscriptionStatus: body.subscriptionStatus === "active" ? "active" : "active",
-            licenseKey: body.licenseKey.trim(),
+            subscriptionStatus: "active",
+            licenseKey,
             customer: typeof body.customer === "string" ? body.customer : null,
             validatedAt: new Date().toISOString(),
             activatedAt: new Date().toISOString(),
@@ -1488,6 +1489,51 @@ const server = createServer((req, res) => {
             graceUntil: body.graceUntil && typeof body.graceUntil === "string" ? body.graceUntil : null,
             lastError: null,
           });
+
+          const hostname = os.hostname();
+          const fingerprint = (state.customer ?? "") + ":" + hostname;
+          const apiBaseForBootstrap = getAllAppConfig(db)["XMON_API_BASE"] || config.xmonApiBase;
+          if (!apiBaseForBootstrap) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ ok: false, error: "api_base_missing" }));
+            return;
+          }
+
+          const activateRes = await activateAppliance(apiBaseForBootstrap, {
+            licenseKey,
+            hostname,
+            fingerprint,
+            applianceName: body.applianceName ?? hostname,
+          });
+
+          if (activateRes.status >= 400 || !activateRes.body.ok) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ ok: false, error: activateRes.body.error ?? "activation_failed", reason: activateRes.body.reason ?? null }));
+            return;
+          }
+
+          const payload = activateRes.body;
+          const save: Record<string, string> = {};
+          if (payload.apiBase) save["XMON_API_BASE"] = payload.apiBase;
+          if (payload.collectorId) save["XMON_COLLECTOR_ID"] = payload.collectorId;
+          if (payload.apiKey) save["XMON_API_KEY"] = payload.apiKey;
+          if (Object.keys(save).length) upsertAppConfigEntries(db, save);
+
+          setLicenseState(db, {
+            status: payload.collectionAllowed ? "active" : "revoked",
+            subscriptionStatus: payload.collectionAllowed ? "active" : "inactive",
+            validatedAt: new Date().toISOString(),
+            expiresAt: payload.effectiveUntil ?? null,
+            lastError: payload.reason ?? null,
+            lastErrorCode: payload.reason ?? null,
+          });
+
+          setCloudState({
+            enabled: true,
+            status: payload.collectionAllowed ? "connected" : "blocked",
+            lastCheckAt: new Date().toISOString(),
+          });
+
           logAdminAuditEvent(db, {
             entityType: "licensing",
             entityId: 1,
@@ -1495,8 +1541,21 @@ const server = createServer((req, res) => {
             actor: currentUsernameFromRequest(db, req),
             after: state,
           });
+
           res.writeHead(200);
-          res.end(JSON.stringify({ ok: true, licensing: state }));
+          res.end(
+            JSON.stringify({
+              ok: true,
+              activated: true,
+              authorized: payload.authorized ?? false,
+              collectionAllowed: payload.collectionAllowed ?? false,
+              collectorId: payload.collectorId ?? null,
+              apiBase: payload.apiBase ?? null,
+              apiKeyIssued: payload.apiKeyIssued ?? false,
+              reason: payload.reason ?? null,
+              licenseStatus: payload.licenseStatus ?? null,
+            })
+          );
         } catch {
           res.writeHead(500);
           res.end(JSON.stringify({ ok: false, error: "db_error" }));
