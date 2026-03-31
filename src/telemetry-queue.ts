@@ -46,6 +46,52 @@ export function enqueueDeviceSnapshot(item: {
   });
 }
 
+export function enqueueSnmpProfileSnapshot(item: {
+  profileId: string;
+  name: string;
+  version: "v2c" | "v3";
+  community?: string;
+  username?: string;
+  ts?: string | Date;
+}) {
+  enqueueTelemetry({
+    messageId: `snmp-profile-${item.profileId}-${Date.now()}`,
+    kind: "event",
+    ts: item.ts ? new Date(item.ts).toISOString() : new Date().toISOString(),
+    payload: {
+      type: "snmp_profile_snapshot",
+      profileId: item.profileId,
+      name: item.name,
+      version: item.version,
+      community: item.community,
+      username: item.username,
+    },
+  });
+}
+
+export function enqueueSnmpPollerSnapshot(item: {
+  pollerId: string;
+  name: string;
+  description?: string;
+  targets: Array<{ oid: string; label?: string }>;
+  intervalSecs: number;
+  ts?: string | Date;
+}) {
+  enqueueTelemetry({
+    messageId: `snmp-poller-${item.pollerId}-${Date.now()}`,
+    kind: "event",
+    ts: item.ts ? new Date(item.ts).toISOString() : new Date().toISOString(),
+    payload: {
+      type: "snmp_poller_snapshot",
+      pollerId: item.pollerId,
+      name: item.name,
+      description: item.description,
+      targets: item.targets,
+      intervalSecs: item.intervalSecs,
+    },
+  });
+}
+
 export function startTelemetryQueue(cfg: AppConfig) {
   setInterval(async () => {
     if (flushing) return;

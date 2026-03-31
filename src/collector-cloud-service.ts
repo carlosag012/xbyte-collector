@@ -4,8 +4,8 @@ import type { DB } from "./db.js";
 import { setLicenseState } from "./db.js";
 import { sendPing, fetchCollectorConfig, type CloudAuthState } from "./xmon-client.js";
 import { enqueueTelemetry, startTelemetryQueue } from "./telemetry-queue.js";
-import { listDevices } from "./db.js";
-import { enqueueDeviceSnapshot } from "./telemetry-queue.js";
+import { listDevices, listPollProfiles } from "./db.js";
+import { enqueueDeviceSnapshot, enqueueSnmpProfileSnapshot, enqueueSnmpPollerSnapshot } from "./telemetry-queue.js";
 
 type BackoffState = { attempts: number };
 
@@ -61,6 +61,35 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
         ts: new Date().toISOString(),
       }),
     );
+    const profiles = listPollProfiles(db).filter((p) => p.kind === "snmp");
+    profiles.forEach((p) => {
+      const cfg = p.config ?? {};
+      const version: "v2c" | "v3" = cfg.version === "v3" ? "v3" : "v2c";
+      enqueueSnmpProfileSnapshot({
+        profileId: String(p.id),
+        name: p.name,
+        version,
+        community: cfg.community,
+        username: cfg.username,
+      });
+      const targets = Array.isArray(cfg.targets)
+        ? cfg.targets
+            .map((t: any) => ({
+              oid: typeof t?.oid === "string" ? t.oid : null,
+              label: typeof t?.label === "string" ? t.label : undefined,
+            }))
+            .filter((t: any) => t.oid)
+        : [];
+      if (targets.length) {
+        enqueueSnmpPollerSnapshot({
+          pollerId: `poller-${p.id}`,
+          name: p.name,
+          description: typeof cfg.description === "string" ? cfg.description : undefined,
+          targets: targets as Array<{ oid: string; label?: string }>,
+          intervalSecs: typeof p.intervalSec === "number" ? p.intervalSec : cfg.intervalSecs ?? 60,
+        });
+      }
+    });
   } catch {
     /* ignore */
   }
