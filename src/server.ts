@@ -118,6 +118,7 @@ import { startCollectorCloudBridge } from "./collector-cloud-service.js";
 import { sendPing, activateAppliance } from "./xmon-client.js";
 
 const config = loadConfig();
+let cloudBridgeStarted = false;
 let dbInitFailed = false;
 
 function resolveXmonConfig(db: DB, overrides?: { apiBase?: string; collectorId?: string; apiKey?: string }) {
@@ -134,12 +135,26 @@ const logDir = join(process.cwd(), "var", "logs");
 const logFile = join(logDir, "xbyte-collector.log");
 const logger = new Logger(config.logLevel ?? "info", logDir, "xbyte-collector.log");
 
+function startCloudBridgeIfReady(db: DB) {
+  if (cloudBridgeStarted) return;
+  const resolvedXmon = resolveXmonConfig(db);
+  const bridgeConfig = {
+    ...config,
+    xmonApiBase: resolvedXmon.apiBase ?? config.xmonApiBase,
+    xmonCollectorId: resolvedXmon.collectorId ?? config.xmonCollectorId,
+    xmonApiKey: resolvedXmon.apiKey ?? config.xmonApiKey,
+  };
+  if (!bridgeConfig.xmonCollectorId || !bridgeConfig.xmonApiKey) return;
+  startCollectorCloudBridge(bridgeConfig, db);
+  cloudBridgeStarted = true;
+}
+
 try {
   db = initDatabase(config);
   syncConfigFromDb(db);
   syncBootstrapFromDb(db);
   logger.info("server_start", { pid: process.pid });
-  startCollectorCloudBridge(config, db);
+  startCloudBridgeIfReady(db);
 } catch (err: any) {
   console.error(
     JSON.stringify({
@@ -1533,6 +1548,8 @@ const server = createServer((req, res) => {
             status: payload.collectionAllowed ? "connected" : "blocked",
             lastCheckAt: new Date().toISOString(),
           });
+
+          startCloudBridgeIfReady(db);
 
           logAdminAuditEvent(db, {
             entityType: "licensing",
