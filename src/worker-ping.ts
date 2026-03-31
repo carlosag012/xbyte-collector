@@ -16,7 +16,7 @@ import {
   licenseAllowsCollection,
   type DB,
 } from "./db.js";
-import { enqueueTelemetry } from "./telemetry-queue.js";
+import { enqueueTelemetry, enqueueDeviceSnapshot } from "./telemetry-queue.js";
 
 type WorkerConfig = {
   workerName: string;
@@ -251,6 +251,18 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
           status,
           result: resultPayload,
         });
+
+        // emit a lightweight device snapshot for inventory/state
+        enqueueDeviceSnapshot({
+          deviceId: detail.device.id,
+          name: detail.device.hostname,
+          deviceType: detail.device.type ?? detail.device.kind ?? undefined,
+          status: success ? "up" : "down",
+          snmpProfileId: detail.device.snmpProfileId ?? null,
+          snmpPollerIds: detail.device.snmpPollerIds ?? null,
+          ts: resultPayload.processedAt,
+        });
+
         currentJobIds.delete(job.id);
       }
 

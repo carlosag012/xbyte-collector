@@ -21,6 +21,31 @@ export function enqueueTelemetry(item: TelemetryItem) {
   queue.push(item);
 }
 
+export function enqueueDeviceSnapshot(item: {
+  deviceId: string;
+  name?: string;
+  deviceType?: string;
+  status?: "up" | "down" | "unknown";
+  snmpProfileId?: string | null;
+  snmpPollerIds?: string[] | null;
+  ts?: string | Date;
+}) {
+  enqueueTelemetry({
+    messageId: `device-${item.deviceId}-${Date.now()}`,
+    kind: "event",
+    ts: item.ts ? new Date(item.ts).toISOString() : new Date().toISOString(),
+    payload: {
+      type: "device_snapshot",
+      deviceId: item.deviceId,
+      name: item.name,
+      deviceType: item.deviceType,
+      status: item.status,
+      snmpProfileId: item.snmpProfileId ?? null,
+      snmpPollerIds: item.snmpPollerIds ?? null,
+    },
+  });
+}
+
 export function startTelemetryQueue(cfg: AppConfig) {
   setInterval(async () => {
     if (flushing) return;

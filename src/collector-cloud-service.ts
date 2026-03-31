@@ -4,6 +4,8 @@ import type { DB } from "./db.js";
 import { setLicenseState } from "./db.js";
 import { sendPing, fetchCollectorConfig, type CloudAuthState } from "./xmon-client.js";
 import { enqueueTelemetry, startTelemetryQueue } from "./telemetry-queue.js";
+import { listDevices } from "./db.js";
+import { enqueueDeviceSnapshot } from "./telemetry-queue.js";
 
 type BackoffState = { attempts: number };
 
@@ -46,6 +48,22 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
   let stopped = false;
   startTelemetryQueue(cfg);
   let lastAuthState: { authorized?: boolean; collectionAllowed?: boolean } = {};
+
+  // Send initial device snapshots once on start
+  try {
+    const devices = listDevices(db);
+    devices.forEach((d) =>
+      enqueueDeviceSnapshot({
+        deviceId: String(d.id),
+        name: d.hostname,
+        deviceType: d.type ?? undefined,
+        status: d.enabled ? "unknown" : "down",
+        ts: new Date().toISOString(),
+      })
+    );
+  } catch {
+    /* ignore */
+  }
 
   async function heartbeatLoop() {
     while (!stopped) {

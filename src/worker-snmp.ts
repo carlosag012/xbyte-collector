@@ -20,7 +20,7 @@ import {
   licenseAllowsCollection,
   type DB,
 } from "./db.js";
-import { enqueueTelemetry } from "./telemetry-queue.js";
+import { enqueueTelemetry, enqueueDeviceSnapshot } from "./telemetry-queue.js";
 
 type WorkerConfig = {
   workerName: string;
@@ -282,6 +282,17 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
         currentJobIds.delete(job.id);
         if (res.success) successCount++;
         else failCount++;
+
+        // emit snapshot
+        enqueueDeviceSnapshot({
+          deviceId: detail.device.id,
+          name: detail.device.hostname,
+          deviceType: detail.device.type ?? detail.device.kind ?? undefined,
+          status: res.success ? "up" : "unknown",
+          snmpProfileId: detail.profile?.id ? String(detail.profile.id) : null,
+          snmpPollerIds: detail.device?.snmpPollerIds ?? null,
+          ts: processedAt,
+        });
 
         log({
           level: res.success ? "info" : "warn",
