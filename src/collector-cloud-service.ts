@@ -56,10 +56,10 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
       enqueueDeviceSnapshot({
         deviceId: String(d.id),
         name: d.hostname,
-        deviceType: d.type ?? undefined,
+        deviceType: undefined,
         status: d.enabled ? "unknown" : "down",
         ts: new Date().toISOString(),
-      })
+      }),
     );
   } catch {
     /* ignore */
@@ -97,10 +97,7 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
         backoff.attempts += 1;
         setCloudState({ enabled: true, status: "error", lastCheckAt: new Date().toISOString() });
       }
-      const delay =
-        typeof retryAfterSec === "number" && retryAfterSec > 0
-          ? retryAfterSec * 1000
-          : backoffDelay(backoff.attempts, heartbeatBase, 300_000);
+      const delay = typeof retryAfterSec === "number" && retryAfterSec > 0 ? retryAfterSec * 1000 : backoffDelay(backoff.attempts, heartbeatBase, 300_000);
       await new Promise((r) => setTimeout(r, delay));
     }
   }
@@ -114,8 +111,7 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
       } catch {
         // ignore
       }
-      const delay =
-        typeof retryAfterSec === "number" && retryAfterSec > 0 ? retryAfterSec * 1000 : configRefreshMs;
+      const delay = typeof retryAfterSec === "number" && retryAfterSec > 0 ? retryAfterSec * 1000 : configRefreshMs;
       await new Promise((r) => setTimeout(r, delay));
     }
   }
