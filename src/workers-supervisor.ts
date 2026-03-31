@@ -1,5 +1,6 @@
 import { fork, ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { initDatabase, getWorkerRegistrationByName, type DB } from "./db.js";
 import { enqueueTelemetry } from "./telemetry-queue.js";
@@ -21,7 +22,8 @@ type ManagedChild = {
 };
 
 function spawnWorker(kind: "ping" | "snmp", name: string): ManagedChild {
-  const runningFromDist = __filename.includes(`${resolve("dist", "src")}`);
+  const thisFile = fileURLToPath(import.meta.url);
+  const runningFromDist = thisFile.includes(`${resolve("dist", "src")}`);
   const script =
     kind === "ping"
       ? resolve(runningFromDist ? "dist/src" : "src", runningFromDist ? "worker-ping.js" : "worker-ping.ts")
