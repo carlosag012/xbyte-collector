@@ -259,8 +259,13 @@ export default function DevicesPage() {
             </form>
             <div className="about-panel">
               <strong>About devices</strong>
-              <p style={{ marginTop: 6 }}>Devices are the managed assets. Add hostname and IP, then attach a poll profile/target to start collection.</p>
-              <p style={{ marginTop: 6 }}>After saving, enqueue a poll from Targets or Jobs to verify connectivity.</p>
+              <p style={{ marginTop: 6 }}>
+                Devices are the managed assets you want to monitor. Add hostname and IP, then attach a poll profile/target to begin collection. Each device can
+                have multiple targets if you want to test different profiles.
+              </p>
+              <p style={{ marginTop: 6 }}>
+                After saving, attach a profile on the Targets page and enqueue a poll (or use Jobs → Manual enqueue) to verify connectivity before rollout.
+              </p>
             </div>
           </div>
         </Card>

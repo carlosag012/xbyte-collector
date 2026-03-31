@@ -146,8 +146,14 @@ function licensingBlockMessage(licensing?: Licensing) {
             </form>
             <div className="about-panel">
               <strong>What is enqueue?</strong>
-              <p style={{ marginTop: 6 }}>Creates a manual poll job for the chosen target. Use this to test connectivity or force an immediate collection.</p>
-              <p style={{ marginTop: 6 }}>Targets map a device to a profile; make sure the target exists and is enabled.</p>
+              <p style={{ marginTop: 6 }}>
+                Enqueue creates a manual poll job for a target (device + profile). Use it to test connectivity, credentials, and SNMP/ping timing immediately
+                instead of waiting for schedules.
+              </p>
+              <p style={{ marginTop: 6 }}>
+                If jobs fail, check Logs for auth/timeout/licensing errors. Make sure the target is enabled and the device/profile pairing is correct before
+                retrying.
+              </p>
             </div>
           </div>
         </Card>

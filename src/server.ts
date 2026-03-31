@@ -114,19 +114,32 @@ import { authenticateLocalUser } from "./auth-service.js";
 import { issueSession, clearSession, readValidSession } from "./session-service.js";
 import { getUserById } from "./db.js";
 import { Logger } from "./logger.js";
+import { startCollectorCloudBridge } from "./collector-cloud-service.js";
+import { sendPing } from "./xmon-client.js";
 
 const config = loadConfig();
 let dbInitFailed = false;
+
+function resolveXmonConfig(db: DB, overrides?: { apiBase?: string; collectorId?: string; apiKey?: string }) {
+  const saved = getAllAppConfig(db);
+  const apiBase = overrides?.apiBase?.trim() || saved["XMON_API_BASE"] || config.xmonApiBase;
+  const collectorId = overrides?.collectorId?.trim() || saved["XMON_COLLECTOR_ID"] || config.xmonCollectorId;
+  const apiKey = overrides?.apiKey?.trim() || saved["XMON_API_KEY"] || config.xmonApiKey;
+  return { apiBase, collectorId, apiKey };
+}
 let db: DB | null = null;
 const distDir = resolve("web", "dist");
 const distIndexPath = join(distDir, "index.html");
-const logger = new Logger(config.logLevel ?? "info");
+const logDir = join(process.cwd(), "var", "logs");
+const logFile = join(logDir, "xbyte-collector.log");
+const logger = new Logger(config.logLevel ?? "info", logDir, "xbyte-collector.log");
 
 try {
   db = initDatabase(config);
   syncConfigFromDb(db);
   syncBootstrapFromDb(db);
   logger.info("server_start", { pid: process.pid });
+  startCollectorCloudBridge(config, db);
 } catch (err: any) {
   console.error(
     JSON.stringify({
@@ -1336,6 +1349,124 @@ const server = createServer((req, res) => {
     return;
   }
 
+  if (method === "GET" && url === "/api/xmon/config") {
+    try {
+      if (!db) throw new Error("db missing");
+      const saved = getAllAppConfig(db);
+      res.writeHead(200);
+      res.end(
+        JSON.stringify({
+          ok: true,
+          apiBase: saved["XMON_API_BASE"] ?? config.xmonApiBase,
+          collectorId: saved["XMON_COLLECTOR_ID"] ?? config.xmonCollectorId,
+          apiKey: saved["XMON_API_KEY"] ? "••••••" : null, // do not return real key
+        })
+      );
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "POST" && url === "/api/xmon/config") {
+    readJsonBody<any>(req)
+      .then((body) => {
+        try {
+          if (!db) throw new Error("db missing");
+          const updates: Record<string, string> = {};
+          if (typeof body?.apiBase === "string" && body.apiBase.trim()) updates["XMON_API_BASE"] = body.apiBase.trim();
+          if (typeof body?.collectorId === "string" && body.collectorId.trim()) updates["XMON_COLLECTOR_ID"] = body.collectorId.trim();
+          if (typeof body?.apiKey === "string" && body.apiKey.trim()) updates["XMON_API_KEY"] = body.apiKey.trim();
+          if (Object.keys(updates).length === 0) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ ok: false, error: "no_updates" }));
+            return;
+          }
+          upsertAppConfigEntries(db, updates);
+          res.writeHead(200);
+          res.end(JSON.stringify({ ok: true }));
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "db_error" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
+  if (method === "POST" && url === "/api/xmon/verify") {
+    readJsonBody<any>(req)
+      .then(async (body) => {
+        try {
+          if (!db) throw new Error("db missing");
+          const overrides = {
+            apiBase: typeof body?.apiBase === "string" ? body.apiBase : undefined,
+            collectorId: typeof body?.collectorId === "string" ? body.collectorId : undefined,
+            apiKey: typeof body?.apiKey === "string" ? body.apiKey : undefined,
+          };
+          const resolved = resolveXmonConfig(db, overrides);
+          if (!resolved.apiBase || !resolved.collectorId || !resolved.apiKey) {
+            res.writeHead(400);
+            res.end(JSON.stringify({ ok: false, error: "missing_config" }));
+            return;
+          }
+          // persist overrides if provided
+          const save: Record<string, string> = {};
+          if (overrides.apiBase?.trim()) save["XMON_API_BASE"] = overrides.apiBase.trim();
+          if (overrides.collectorId?.trim()) save["XMON_COLLECTOR_ID"] = overrides.collectorId.trim();
+          if (overrides.apiKey?.trim()) save["XMON_API_KEY"] = overrides.apiKey.trim();
+          if (Object.keys(save).length) upsertAppConfigEntries(db, save);
+
+          const result = await sendPing({
+            ...config,
+            xmonApiBase: resolved.apiBase,
+            xmonCollectorId: resolved.collectorId,
+            xmonApiKey: resolved.apiKey,
+          });
+          const { state } = result;
+          setLicenseState(db, {
+            status: state.collectionAllowed ? "active" : "revoked",
+            subscriptionStatus: state.collectionAllowed ? "active" : "inactive",
+            validatedAt: state.lastCheckedAt ?? new Date().toISOString(),
+            expiresAt: state.effectiveUntil ?? null,
+            lastError: state.reason ?? null,
+            lastErrorCode: state.reason ?? null,
+          });
+          setCloudState({
+            enabled: true,
+            status: state.collectionAllowed ? "connected" : "blocked",
+            lastCheckAt: state.lastCheckedAt ?? new Date().toISOString(),
+          });
+          res.writeHead(200);
+          res.end(
+            JSON.stringify({
+              ok: true,
+              authorized: state.authorized,
+              collectionAllowed: state.collectionAllowed,
+              licenseStatus: state.licenseStatus ?? null,
+              effectiveUntil: state.effectiveUntil ?? null,
+              reason: state.reason ?? null,
+              collectorRegistered: true,
+              collectorLimit: null,
+              activeCollectorCount: 0,
+            })
+          );
+        } catch {
+          res.writeHead(500);
+          res.end(JSON.stringify({ ok: false, error: "verify_failed" }));
+        }
+      })
+      .catch(() => {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
+      });
+    return;
+  }
+
   if (method === "POST" && url === "/api/licensing/activate") {
     readJsonBody<any>(req)
       .then((body) => {
@@ -1544,9 +1675,8 @@ const server = createServer((req, res) => {
 
   if (method === "GET" && url === "/api/system/logs") {
     try {
-      const logPath = join(process.cwd(), "var", "logs", "xbyte-collector.log");
-      const fallbackPath = join(process.cwd(), "var", "log", "xbyte-collector.log");
-      const path = existsSync(logPath) ? logPath : fallbackPath;
+      const logPath = existsSync(logFile) ? logFile : join(process.cwd(), "var", "log", "xbyte-collector.log");
+      const path = logPath;
       let entries: Array<{ ts: string; line: string }> = [];
       if (existsSync(path)) {
         const content = readFileSync(path, "utf8");

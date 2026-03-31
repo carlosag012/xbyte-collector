@@ -29,6 +29,11 @@ const EnvSchema = z
     WORKER_MAX_RESTARTS_PER_WINDOW: z.coerce.number().int().positive().optional(),
     WORKER_RESTART_WINDOW_MS: z.coerce.number().int().positive().optional(),
     LOG_LEVEL: z.string().optional(),
+    XMON_API_BASE: z.string().optional(),
+    XMON_COLLECTOR_ID: z.string().optional(),
+    XMON_API_KEY: z.string().optional(),
+    XMON_HEARTBEAT_MS: z.coerce.number().int().positive().optional(),
+    XMON_CONFIG_REFRESH_MS: z.coerce.number().int().positive().optional(),
   })
   .transform((v) => ({
     nodeEnv: v.NODE_ENV,
@@ -58,6 +63,11 @@ const EnvSchema = z
     workerMaxRestartsPerWindow: v.WORKER_MAX_RESTARTS_PER_WINDOW ?? 10,
     workerRestartWindowMs: v.WORKER_RESTART_WINDOW_MS ?? 60000,
     logLevel: (v.LOG_LEVEL ?? "info") as any,
+    xmonApiBase: v.XMON_API_BASE?.trim() || "http://localhost:4000/api/xmon",
+    xmonCollectorId: v.XMON_COLLECTOR_ID?.trim() || null,
+    xmonApiKey: v.XMON_API_KEY?.trim() || null,
+    xmonHeartbeatMs: v.XMON_HEARTBEAT_MS ?? 15000,
+    xmonConfigRefreshMs: v.XMON_CONFIG_REFRESH_MS ?? 60000,
   }));
 
 export type AppConfig = z.infer<typeof EnvSchema>;

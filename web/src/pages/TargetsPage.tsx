@@ -175,8 +175,13 @@ export default function TargetsPage() {
             </form>
             <div className="about-panel">
               <strong>About targets</strong>
-              <p style={{ marginTop: 6 }}>Targets link devices to poll profiles. Enable a target, then enqueue a poll to verify connectivity.</p>
-              <p style={{ marginTop: 6 }}>Use jobs/logs for troubleshooting if a poll fails.</p>
+              <p style={{ marginTop: 6 }}>
+                Targets connect a device to a poll profile. Enable a target when you are ready to collect, then enqueue a poll to validate credentials and
+                reachability. You can keep multiple targets per device to test different profiles.
+              </p>
+              <p style={{ marginTop: 6 }}>
+                If a poll fails, check Jobs and Logs for auth/timeout details. Adjust the profile or device IP, then retry enqueue to confirm recovery.
+              </p>
             </div>
           </div>
         </Card>

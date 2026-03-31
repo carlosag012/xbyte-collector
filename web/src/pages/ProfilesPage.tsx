@@ -216,8 +216,14 @@ export default function ProfilesPage() {
             </form>
             <div className="about-panel">
               <strong>About profiles</strong>
-              <p style={{ marginTop: 6 }}>Profiles define how devices are polled. Use ping for reachability; SNMP needs the correct community or v3 credentials.</p>
-              <p style={{ marginTop: 6 }}>Attach profiles to targets, then enqueue a poll to verify connectivity.</p>
+              <p style={{ marginTop: 6 }}>
+                Profiles define how a device is polled. Use Ping for basic reachability. Use SNMP when you need system/interface/LLDP data; provide the proper
+                community or v3 credentials and security level your devices expect.
+              </p>
+              <p style={{ marginTop: 6 }}>
+                After creating a profile, attach it to a device as a Target and enqueue a poll. If you see auth errors, recheck communities/users/auth/priv
+                settings here.
+              </p>
             </div>
           </div>
         </Card>

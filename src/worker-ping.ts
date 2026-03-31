@@ -16,6 +16,7 @@ import {
   licenseAllowsCollection,
   type DB,
 } from "./db.js";
+import { enqueueTelemetry } from "./telemetry-queue.js";
 
 type WorkerConfig = {
   workerName: string;
@@ -105,6 +106,17 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
       if (shuttingDown.flag) break;
       const self = getWorkerRegistrationByName(db, workerCfg.workerName);
       if (!self || self.enabled === false) {
+        await delay(workerCfg.loopMs);
+        continue;
+      }
+      const licPre = licenseAllowsCollection(db);
+      if (!licPre.allowed) {
+        enqueueTelemetry({
+          messageId: `blocked-${workerCfg.workerName}-${Date.now()}`,
+          kind: "event",
+          ts: new Date().toISOString(),
+          payload: { type: "worker_blocked", workerName: workerCfg.workerName, reason: licPre.reason ?? "license_required" },
+        });
         await delay(workerCfg.loopMs);
         continue;
       }

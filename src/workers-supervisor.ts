@@ -2,6 +2,7 @@ import { fork, ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
 import { loadConfig } from "./config.js";
 import { initDatabase, getWorkerRegistrationByName, type DB } from "./db.js";
+import { enqueueTelemetry } from "./telemetry-queue.js";
 
 function log(data: Record<string, any>) {
   console.log(
@@ -53,6 +54,12 @@ async function main() {
       log({ level: "info", msg: "worker launch skipped (disabled)", kind: "ping", name });
     } else {
       children.push(spawnWorker("ping", name));
+      enqueueTelemetry({
+        messageId: `worker-start-${name}-${Date.now()}`,
+        kind: "event",
+        ts: new Date().toISOString(),
+        payload: { type: "worker_started", workerName: name, workerKind: "ping" },
+      });
     }
   }
   for (let i = 1; i <= snmpCount; i++) {
@@ -62,6 +69,12 @@ async function main() {
       log({ level: "info", msg: "worker launch skipped (disabled)", kind: "snmp", name });
     } else {
       children.push(spawnWorker("snmp", name));
+      enqueueTelemetry({
+        messageId: `worker-start-${name}-${Date.now()}`,
+        kind: "event",
+        ts: new Date().toISOString(),
+        payload: { type: "worker_started", workerName: name, workerKind: "snmp" },
+      });
     }
   }
 
