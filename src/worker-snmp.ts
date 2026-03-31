@@ -18,9 +18,10 @@ import {
   replaceLldpNeighborsForDevice,
   upsertDiscoveredDeviceCandidatesFromLldp,
   licenseAllowsCollection,
+  getAllAppConfig,
   type DB,
 } from "./db.js";
-import { enqueueTelemetry, enqueueDeviceSnapshot } from "./telemetry-queue.js";
+import { enqueueTelemetry, enqueueDeviceSnapshot, startTelemetryQueue } from "./telemetry-queue.js";
 
 type WorkerConfig = {
   workerName: string;
@@ -339,6 +340,14 @@ async function main() {
   const workerCfg = buildWorkerConfig();
   const config = loadConfig();
   const db = initDatabase(config);
+  const saved = getAllAppConfig(db);
+  const effectiveConfig = {
+    ...config,
+    xmonApiBase: saved["XMON_API_BASE"] || config.xmonApiBase,
+    xmonCollectorId: saved["XMON_COLLECTOR_ID"] || config.xmonCollectorId,
+    xmonApiKey: saved["XMON_API_KEY"] || config.xmonApiKey,
+  };
+  startTelemetryQueue(effectiveConfig);
   const shuttingDown = { flag: false };
 
   const shutdown = async (signal: string) => {
