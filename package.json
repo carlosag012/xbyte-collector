@@ -11,7 +11,8 @@
     "dev": "tsx watch src/server.ts",
     "worker:ping": "tsx src/worker-ping.ts",
     "worker:snmp": "tsx src/worker-snmp.ts",
-    "workers:start": "tsx src/workers-supervisor.ts"
+    "workers:start": "node dist/src/workers-supervisor.js",
+    "workers:start:dev": "tsx src/workers-supervisor.ts"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.5",
