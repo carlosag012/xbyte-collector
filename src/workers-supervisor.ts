@@ -21,11 +21,11 @@ type ManagedChild = {
 };
 
 function spawnWorker(kind: "ping" | "snmp", name: string): ManagedChild {
-  const isDev = process.env.NODE_ENV !== "production";
+  const runningFromDist = __filename.includes(`${resolve("dist", "src")}`);
   const script =
     kind === "ping"
-      ? resolve(isDev ? "src" : "dist/src", isDev ? "worker-ping.ts" : "worker-ping.js")
-      : resolve(isDev ? "src" : "dist/src", isDev ? "worker-snmp.ts" : "worker-snmp.js");
+      ? resolve(runningFromDist ? "dist/src" : "src", runningFromDist ? "worker-ping.js" : "worker-ping.ts")
+      : resolve(runningFromDist ? "dist/src" : "src", runningFromDist ? "worker-snmp.js" : "worker-snmp.ts");
   const env = { ...process.env };
   if (kind === "ping") env.PING_WORKER_NAME = name;
   if (kind === "snmp") env.SNMP_WORKER_NAME = name;
