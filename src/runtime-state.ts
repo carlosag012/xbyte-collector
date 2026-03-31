@@ -7,7 +7,7 @@ type BootstrapState = {
 
 type CloudState = {
   enabled: boolean;
-  status: "not-configured" | "connecting" | "connected" | "error";
+  status: "not-configured" | "connecting" | "connected" | "blocked" | "error";
   lastCheckAt: string | null;
 };
 
