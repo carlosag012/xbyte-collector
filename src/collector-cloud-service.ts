@@ -4,7 +4,7 @@ import type { DB } from "./db.js";
 import { setLicenseState } from "./db.js";
 import { sendPing, fetchCollectorConfig, type CloudAuthState } from "./xmon-client.js";
 import { enqueueTelemetry, startTelemetryQueue } from "./telemetry-queue.js";
-import { listDevices, listPollProfiles } from "./db.js";
+import { listDevices, listPollProfiles, listPollTargets } from "./db.js";
 import { enqueueDeviceSnapshot, enqueueSnmpProfileSnapshot, enqueueSnmpPollerSnapshot } from "./telemetry-queue.js";
 
 type BackoffState = { attempts: number };
@@ -62,9 +62,16 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
       }),
     );
     const profiles = listPollProfiles(db).filter((p) => p.kind === "snmp");
+    const pollTargets = listPollTargets(db);
+    const targetsByProfile = new Map<number, typeof pollTargets>();
+    pollTargets.forEach((t) => {
+      if (!targetsByProfile.has(t.profileId)) targetsByProfile.set(t.profileId, []);
+      targetsByProfile.get(t.profileId)!.push(t);
+    });
     profiles.forEach((p) => {
       const cfg = p.config ?? {};
-      const version: "v2c" | "v3" = cfg.version === "v3" ? "v3" : "v2c";
+      const version: "v2c" | "v3" =
+        typeof cfg.version === "string" && cfg.version.toLowerCase() === "v3" ? "v3" : "v2c";
       enqueueSnmpProfileSnapshot({
         profileId: String(p.id),
         name: p.name,
@@ -72,7 +79,7 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
         community: cfg.community,
         username: cfg.username,
       });
-      const targets = Array.isArray(cfg.targets)
+      const targetsFromCfg = Array.isArray(cfg.targets)
         ? cfg.targets
             .map((t: any) => ({
               oid: typeof t?.oid === "string" ? t.oid : null,
@@ -80,6 +87,12 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
             }))
             .filter((t: any) => t.oid)
         : [];
+      const targetsFromDb =
+        targetsByProfile.get(p.id)?.map((t) => ({
+          oid: "1.3.6.1.2.1.1.3.0",
+          label: `profile-${p.id}-target-${t.id}`,
+        })) ?? [];
+      const targets = targetsFromCfg.length ? targetsFromCfg : targetsFromDb;
       if (targets.length) {
         enqueueSnmpPollerSnapshot({
           pollerId: `poller-${p.id}`,
