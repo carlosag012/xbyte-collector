@@ -120,6 +120,7 @@ import { sendPing, activateAppliance } from "./xmon-client.js";
 const config = loadConfig();
 let cloudBridgeStarted = false;
 let dbInitFailed = false;
+let pollSchedulerHandle: NodeJS.Timeout | null = null;
 
 function resolveXmonConfig(db: DB, overrides?: { apiBase?: string; collectorId?: string; apiKey?: string }) {
   const saved = getAllAppConfig(db);
@@ -149,12 +150,35 @@ function startCloudBridgeIfReady(db: DB) {
   cloudBridgeStarted = true;
 }
 
+function startPollScheduler(db: DB) {
+  if (pollSchedulerHandle) return;
+  const intervalMs = 30000; // minimal scheduler, 30s
+  pollSchedulerHandle = setInterval(() => {
+    try {
+      if (!licenseAllowsCollection(db).allowed) return;
+      const enabledTargets = listEnabledPollTargets(db);
+      if (!enabledTargets.length) return;
+      const hasActiveStmt = db.prepare(
+        `SELECT COUNT(*) as cnt FROM poll_jobs WHERE target_id = ? AND status IN ('pending','running')`
+      );
+      for (const t of enabledTargets) {
+        const row = hasActiveStmt.get(t.id) as { cnt: number };
+        if (row?.cnt && row.cnt > 0) continue;
+        enqueuePollJobForTarget(db, t.id);
+      }
+    } catch (err: any) {
+      // best-effort; do not crash server
+    }
+  }, intervalMs);
+}
+
 try {
   db = initDatabase(config);
   syncConfigFromDb(db);
   syncBootstrapFromDb(db);
   logger.info("server_start", { pid: process.pid });
   startCloudBridgeIfReady(db);
+  startPollScheduler(db);
 } catch (err: any) {
   console.error(
     JSON.stringify({
