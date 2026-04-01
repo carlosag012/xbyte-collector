@@ -78,6 +78,8 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
         status: d.enabled ? "unknown" : "down",
         snmpProfileId: snmpProfileId !== undefined ? String(snmpProfileId) : null,
         snmpPollerIds: snmpPollerIds.length ? snmpPollerIds.map(String) : null,
+        successCount: 0,
+        failureCount: 0,
         ts: new Date().toISOString(),
       });
     });
