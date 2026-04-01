@@ -291,7 +291,7 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
           deviceType: detail.device.type ?? detail.device.kind ?? undefined,
           status: res.success ? "up" : "unknown",
           snmpProfileId: detail.profile?.id ? String(detail.profile.id) : null,
-          snmpPollerIds: detail.device?.snmpPollerIds ?? null,
+          snmpPollerIds: detail.device?.snmpPollerIds ?? undefined,
           successCount,
           failureCount: failCount,
           ts: processedAt,
