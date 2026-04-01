@@ -17,7 +17,7 @@ import {
   getAllAppConfig,
   type DB,
 } from "./db.js";
-import { enqueueTelemetry, enqueueDeviceSnapshot, startTelemetryQueue } from "./telemetry-queue.js";
+import { enqueueTelemetry, enqueueDeviceSnapshot, enqueueDeviceState, startTelemetryQueue } from "./telemetry-queue.js";
 
 type WorkerConfig = {
   workerName: string;
@@ -263,6 +263,13 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
           snmpPollerIds: detail.device.snmpPollerIds ?? null,
           successCount,
           failureCount: failCount,
+          ts: resultPayload.processedAt,
+        });
+        enqueueDeviceState({
+          deviceId: detail.device.id,
+          status: success ? "up" : "down",
+          successCountDelta: success ? 1 : 0,
+          failureCountDelta: success ? 0 : 1,
           ts: resultPayload.processedAt,
         });
 

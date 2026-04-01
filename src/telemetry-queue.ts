@@ -50,6 +50,28 @@ export function enqueueDeviceSnapshot(item: {
   });
 }
 
+export function enqueueDeviceState(item: {
+  deviceId: string;
+  status: "up" | "down" | "unknown";
+  successCountDelta: number;
+  failureCountDelta: number;
+  ts?: string | Date;
+}) {
+  enqueueTelemetry({
+    messageId: `device-state-${item.deviceId}-${Date.now()}`,
+    kind: "event",
+    ts: item.ts ? new Date(item.ts).toISOString() : new Date().toISOString(),
+    payload: {
+      type: "device_state",
+      deviceId: item.deviceId,
+      status: item.status,
+      successCountDelta: item.successCountDelta,
+      failureCountDelta: item.failureCountDelta,
+      lastPingAt: item.ts ? new Date(item.ts).toISOString() : undefined,
+    },
+  });
+}
+
 export function enqueueSnmpProfileSnapshot(item: {
   profileId: string;
   name: string;
