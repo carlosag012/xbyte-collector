@@ -52,21 +52,34 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
   // Send initial device snapshots once on start
   try {
     const devices = listDevices(db);
-    devices.forEach((d) =>
+    const profiles = listPollProfiles(db).filter((p) => p.kind?.toLowerCase?.() === "snmp");
+    const pollTargets = listPollTargets(db);
+    const targetsByProfile = new Map<number, typeof pollTargets>();
+    const targetsByDevice = new Map<number, typeof pollTargets>();
+    pollTargets.forEach((t) => {
+      if (!targetsByProfile.has(t.profileId)) targetsByProfile.set(t.profileId, []);
+      targetsByProfile.get(t.profileId)!.push(t);
+      if (!targetsByDevice.has(t.deviceId)) targetsByDevice.set(t.deviceId, []);
+      targetsByDevice.get(t.deviceId)!.push(t);
+    });
+    devices.forEach((d) => {
+      const deviceTargets = targetsByDevice.get(d.id) ?? [];
+      const snmpProfileId =
+        deviceTargets.find((t) => profiles.some((p) => p.id === t.profileId))?.profileId ??
+        (deviceTargets.length ? deviceTargets[0].profileId : undefined);
+      const snmpPollerIds =
+        snmpProfileId !== undefined && snmpProfileId !== null
+          ? [`poller-${snmpProfileId}`]
+          : deviceTargets.map((t) => `poller-${t.profileId}`);
       enqueueDeviceSnapshot({
         deviceId: String(d.id),
         name: d.hostname,
         deviceType: undefined,
         status: d.enabled ? "unknown" : "down",
+        snmpProfileId: snmpProfileId !== undefined ? String(snmpProfileId) : null,
+        snmpPollerIds: snmpPollerIds.length ? snmpPollerIds.map(String) : null,
         ts: new Date().toISOString(),
-      }),
-    );
-    const profiles = listPollProfiles(db).filter((p) => p.kind === "snmp");
-    const pollTargets = listPollTargets(db);
-    const targetsByProfile = new Map<number, typeof pollTargets>();
-    pollTargets.forEach((t) => {
-      if (!targetsByProfile.has(t.profileId)) targetsByProfile.set(t.profileId, []);
-      targetsByProfile.get(t.profileId)!.push(t);
+      });
     });
     profiles.forEach((p) => {
       const cfg = p.config ?? {};
