@@ -28,6 +28,8 @@ export function enqueueDeviceSnapshot(item: {
   status?: "up" | "down" | "unknown";
   snmpProfileId?: string | null;
   snmpPollerIds?: string[] | null;
+  successCount?: number;
+  failureCount?: number;
   ts?: string | Date;
 }) {
   enqueueTelemetry({
@@ -42,6 +44,8 @@ export function enqueueDeviceSnapshot(item: {
       status: item.status,
       snmpProfileId: item.snmpProfileId ?? null,
       snmpPollerIds: item.snmpPollerIds ?? null,
+      successCount: item.successCount,
+      failureCount: item.failureCount,
     },
   });
 }
