@@ -43,7 +43,7 @@ export function enqueueDeviceSnapshot(item: {
       deviceType: item.deviceType,
       status: item.status,
       snmpProfileId: item.snmpProfileId ?? null,
-      snmpPollerIds: item.snmpPollerIds ?? null,
+      snmpPollerIds: item.snmpPollerIds,
       successCount: item.successCount,
       failureCount: item.failureCount,
     },
