@@ -81,7 +81,7 @@ export function buildApplianceSummary(db: DB, identity?: ApplianceIdentity): App
 
   return {
     applianceId: resolved.applianceId,
-    orgId: resolved.orgId ?? configState.orgId || null,
+    orgId: resolved.orgId ?? configState.orgId ?? null,
     startedAt: runtimeState.startedAt,
     version: versionInfo,
     bootstrap: runtimeState.bootstrap,
