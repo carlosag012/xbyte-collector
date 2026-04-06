@@ -1,5 +1,6 @@
 import type { AppConfig } from "./config.js";
 import type { DB } from "./db.js";
+import { getAllAppConfig } from "./db.js";
 import { configState } from "./config-state.js";
 import {
   buildApplianceSummary,
@@ -31,20 +32,29 @@ async function postJson(url: string, payload: unknown, headers: Record<string, s
   return { status: res.status, ok: res.ok, body };
 }
 
+function resolveXmonFromDb(cfg: AppConfig, db: DB) {
+  const saved = getAllAppConfig(db);
+  const apiBase = saved["XMON_API_BASE"] || cfg.xmonApiBase;
+  const collectorId = saved["XMON_COLLECTOR_ID"] || cfg.xmonCollectorId;
+  const apiKey = saved["XMON_API_KEY"] || cfg.xmonApiKey;
+  return { apiBase, collectorId, apiKey };
+}
+
 async function sendRegister(cfg: AppConfig, db: DB): Promise<SyncResult> {
-  if (!cfg.xmonApiBase || !cfg.xmonApiKey) return { ok: false };
+  const resolved = resolveXmonFromDb(cfg, db);
+  if (!resolved.apiBase || !resolved.apiKey) return { ok: false };
   const identity = loadApplianceIdentity(db, configState.orgId);
   const summary = buildApplianceSummary(db, identity);
   const payload = {
     applianceId: identity.applianceId,
     orgId: identity.orgId ?? configState.orgId ?? null,
-    collectorId: cfg.xmonCollectorId ?? null,
+    collectorId: resolved.collectorId ?? null,
     summary,
   };
   const res = await postJson(
-    `${cfg.xmonApiBase.replace(/\/+$/, "")}/appliances/register`,
+    `${resolved.apiBase.replace(/\/+$/, "")}/appliances/register`,
     payload,
-    { "x-xmon-api-key": cfg.xmonApiKey }
+    { "x-xmon-api-key": resolved.apiKey }
   );
   if (res.ok) {
     const nowIso = new Date().toISOString();
@@ -60,19 +70,20 @@ async function sendRegister(cfg: AppConfig, db: DB): Promise<SyncResult> {
 }
 
 async function sendHeartbeat(cfg: AppConfig, db: DB): Promise<SyncResult> {
-  if (!cfg.xmonApiBase || !cfg.xmonApiKey) return { ok: false };
+  const resolved = resolveXmonFromDb(cfg, db);
+  if (!resolved.apiBase || !resolved.apiKey) return { ok: false };
   const identity = loadApplianceIdentity(db, configState.orgId);
   const summary = buildApplianceSummary(db, identity);
   const payload = {
     applianceId: identity.applianceId,
     orgId: identity.orgId ?? configState.orgId ?? null,
-    collectorId: cfg.xmonCollectorId ?? null,
+    collectorId: resolved.collectorId ?? null,
     summary,
   };
   const res = await postJson(
-    `${cfg.xmonApiBase.replace(/\/+$/, "")}/appliances/heartbeat`,
+    `${resolved.apiBase.replace(/\/+$/, "")}/appliances/heartbeat`,
     payload,
-    { "x-xmon-api-key": cfg.xmonApiKey }
+    { "x-xmon-api-key": resolved.apiKey }
   );
   if (res.ok) {
     const nowIso = new Date().toISOString();
@@ -88,7 +99,8 @@ async function sendHeartbeat(cfg: AppConfig, db: DB): Promise<SyncResult> {
 }
 
 export function startApplianceSync(cfg: AppConfig, db: DB) {
-  if (!cfg.xmonApiBase || !cfg.xmonApiKey) return () => {};
+  const resolved = resolveXmonFromDb(cfg, db);
+  if (!resolved.apiBase || !resolved.apiKey) return () => {};
   const heartbeatMs = Math.max(5000, cfg.xmonHeartbeatMs ?? 15000);
   let stopped = false;
 
