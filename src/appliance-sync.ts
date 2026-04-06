@@ -89,7 +89,7 @@ async function sendHeartbeat(cfg: AppConfig, db: DB): Promise<SyncResult> {
 
 export function startApplianceSync(cfg: AppConfig, db: DB) {
   if (!cfg.xmonApiBase || !cfg.xmonApiKey) return () => {};
-  const heartbeatMs = Math.max(5000, cfg.applianceHeartbeatMs ?? cfg.xmonHeartbeatMs ?? 15000);
+  const heartbeatMs = Math.max(5000, cfg.xmonHeartbeatMs ?? 15000);
   let stopped = false;
 
   const identity = loadApplianceIdentity(db, configState.orgId);
