@@ -15,6 +15,14 @@ type WorkersState = {
   registered: number;
 };
 
+type ApplianceRuntime = {
+  applianceId: string | null;
+  orgId: string | null;
+  lastRegisterAt: string | null;
+  lastHeartbeatAt: string | null;
+  lastError: string | null;
+};
+
 const startedAt = new Date().toISOString();
 
 export const runtimeState: {
@@ -22,6 +30,7 @@ export const runtimeState: {
   bootstrap: BootstrapState;
   cloud: CloudState;
   workers: WorkersState;
+  appliance: ApplianceRuntime;
 } = {
   startedAt,
   bootstrap: {
@@ -35,6 +44,13 @@ export const runtimeState: {
   },
   workers: {
     registered: 0,
+  },
+  appliance: {
+    applianceId: null,
+    orgId: null,
+    lastRegisterAt: null,
+    lastHeartbeatAt: null,
+    lastError: null,
   },
 };
 
@@ -55,5 +71,19 @@ export function setCloudState(update: Partial<CloudState>) {
 export function setRegisteredWorkers(count: number) {
   runtimeState.workers = {
     registered: Math.max(0, Math.trunc(count)),
+  };
+}
+
+export function setApplianceIdentity(update: { applianceId?: string | null; orgId?: string | null }) {
+  runtimeState.appliance = {
+    ...runtimeState.appliance,
+    ...update,
+  };
+}
+
+export function setApplianceTimestamps(update: { lastRegisterAt?: string | null; lastHeartbeatAt?: string | null; lastError?: string | null }) {
+  runtimeState.appliance = {
+    ...runtimeState.appliance,
+    ...update,
   };
 }

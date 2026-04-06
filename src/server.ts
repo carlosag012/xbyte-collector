@@ -54,6 +54,7 @@ import {
   getPollJobSummaryForWorker,
   getPollJobSummary,
   getStalePollJobSummary,
+  getDevicePollHealth,
   getPendingPollJobAvailabilityForWorkerCapabilities,
   claimNextPendingPollJobForWorker,
   claimNextPendingPollJobForWorkerCapabilities,
@@ -116,11 +117,14 @@ import { getUserById } from "./db.js";
 import { Logger } from "./logger.js";
 import { startCollectorCloudBridge } from "./collector-cloud-service.js";
 import { sendPing, activateAppliance } from "./xmon-client.js";
+import { loadApplianceIdentity, buildApplianceSummary } from "./appliance-state.js";
+import { startApplianceSync } from "./appliance-sync.js";
 
 const config = loadConfig();
 let cloudBridgeStarted = false;
 let dbInitFailed = false;
 let pollSchedulerHandle: NodeJS.Timeout | null = null;
+let stopApplianceSync: (() => void) | null = null;
 
 function resolveXmonConfig(db: DB, overrides?: { apiBase?: string; collectorId?: string; apiKey?: string }) {
   const saved = getAllAppConfig(db);
@@ -176,8 +180,11 @@ try {
   db = initDatabase(config);
   syncConfigFromDb(db);
   syncBootstrapFromDb(db);
+  setRegisteredWorkers(listWorkerRegistrations(db).length);
   logger.info("server_start", { pid: process.pid });
+  loadApplianceIdentity(db, configState.orgId);
   startCloudBridgeIfReady(db);
+  stopApplianceSync = startApplianceSync(config, db);
   startPollScheduler(db);
 } catch (err: any) {
   console.error(
@@ -235,6 +242,7 @@ const server = createServer((req, res) => {
         cloud: runtimeState.cloud,
         workers: runtimeState.workers,
         config: configState,
+        appliance: db ? buildApplianceSummary(db) : null,
       })
     );
     return;
@@ -258,6 +266,19 @@ const server = createServer((req, res) => {
           error: "db_error",
         })
       );
+    }
+    return;
+  }
+
+  if (method === "GET" && url === "/api/appliance/summary") {
+    try {
+      if (!db) throw new Error("db missing");
+      const summary = buildApplianceSummary(db);
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, summary }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "summary_unavailable" }));
     }
     return;
   }
@@ -576,7 +597,7 @@ const server = createServer((req, res) => {
   if (method === "GET" && url === "/api/devices") {
     try {
       if (!db) throw new Error("db missing");
-      const devices = listDevices(db);
+      const devices = listDevices(db).map((d) => ({ ...d, pollHealth: getDevicePollHealth(db, d.id) }));
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true, devices }));
     } catch {
@@ -814,6 +835,7 @@ const server = createServer((req, res) => {
             capabilities: typeof body.capabilities === "object" && body.capabilities !== null ? body.capabilities : {},
             enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
           });
+          setRegisteredWorkers(listWorkerRegistrations(db).length);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true, worker }));
         } catch {
@@ -1718,6 +1740,7 @@ const server = createServer((req, res) => {
             res.end(JSON.stringify({ ok: false, error: "worker_not_found" }));
             return;
           }
+          setRegisteredWorkers(listWorkerRegistrations(db).length);
           res.writeHead(200);
           res.end(JSON.stringify({ ok: true, worker }));
         } catch {
@@ -4320,6 +4343,14 @@ let shuttingDown = false;
 function handleShutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
+
+  if (stopApplianceSync) {
+    try {
+      stopApplianceSync();
+    } catch {
+      /* ignore */
+    }
+  }
 
   console.log(
     JSON.stringify({

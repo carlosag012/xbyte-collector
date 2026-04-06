@@ -261,8 +261,8 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
           status: success ? "up" : "down",
           snmpProfileId: detail.device.snmpProfileId ?? null,
           snmpPollerIds: detail.device.snmpPollerIds ?? undefined,
-          successCount,
-          failureCount: failCount,
+          successCount: success ? 1 : 0,
+          failureCount: success ? 0 : 1,
           ts: resultPayload.processedAt,
         });
         enqueueDeviceState({
@@ -271,6 +271,11 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
           successCountDelta: success ? 1 : 0,
           failureCountDelta: success ? 0 : 1,
           ts: resultPayload.processedAt,
+          lastSuccessAt: success ? resultPayload.processedAt : undefined,
+          lastFailureAt: success ? undefined : resultPayload.processedAt,
+          lastPollAt: resultPayload.processedAt,
+          lastError: success ? null : resultPayload.error ?? null,
+          latencyMs: probe?.latencyMs ?? null,
         });
 
         currentJobIds.delete(job.id);

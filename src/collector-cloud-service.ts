@@ -4,7 +4,7 @@ import type { DB } from "./db.js";
 import { setLicenseState } from "./db.js";
 import { sendPing, fetchCollectorConfig, type CloudAuthState } from "./xmon-client.js";
 import { enqueueTelemetry, startTelemetryQueue } from "./telemetry-queue.js";
-import { listDevices, listPollProfiles, listPollTargets } from "./db.js";
+import { listDevices, listPollProfiles, listPollTargets, updateCloudSyncState, upsertAppConfigEntries } from "./db.js";
 import { enqueueDeviceSnapshot, enqueueSnmpProfileSnapshot, enqueueSnmpPollerSnapshot } from "./telemetry-queue.js";
 
 type BackoffState = { attempts: number };
@@ -165,6 +165,22 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
       try {
         const res = await fetchCollectorConfig(cfg);
         retryAfterSec = res.retryAfterSec;
+        if (db) {
+          // surface drift visibility: mark last fetch even if not applied
+          const nowIso = new Date().toISOString();
+          updateCloudSyncState(db, {
+            enabled: true,
+            status: res.config ? "fetched_not_applied" : "fetched_empty",
+            lastSyncAt: nowIso,
+            cloudEndpoint: cfg.xmonApiBase,
+          });
+          if (res.config) {
+            upsertAppConfigEntries(db, {
+              XMON_LAST_CONFIG: JSON.stringify(res.config),
+              XMON_LAST_CONFIG_AT: nowIso,
+            });
+          }
+        }
       } catch {
         // ignore
       }

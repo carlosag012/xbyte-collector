@@ -56,6 +56,11 @@ export function enqueueDeviceState(item: {
   successCountDelta: number;
   failureCountDelta: number;
   ts?: string | Date;
+  lastSuccessAt?: string | Date;
+  lastFailureAt?: string | Date;
+  lastPollAt?: string | Date;
+  lastError?: string | null;
+  latencyMs?: number | null;
 }) {
   enqueueTelemetry({
     messageId: `device-state-${item.deviceId}-${Date.now()}`,
@@ -67,6 +72,11 @@ export function enqueueDeviceState(item: {
       status: item.status,
       successCountDelta: item.successCountDelta,
       failureCountDelta: item.failureCountDelta,
+      lastSuccessAt: item.lastSuccessAt ? new Date(item.lastSuccessAt).toISOString() : undefined,
+      lastFailureAt: item.lastFailureAt ? new Date(item.lastFailureAt).toISOString() : undefined,
+      lastPollAt: item.lastPollAt ? new Date(item.lastPollAt).toISOString() : item.ts ? new Date(item.ts).toISOString() : undefined,
+      lastError: item.lastError ?? undefined,
+      latencyMs: item.latencyMs ?? undefined,
       lastPingAt: item.ts ? new Date(item.ts).toISOString() : undefined,
     },
   });
