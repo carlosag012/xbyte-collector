@@ -2,6 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, Empty, PageHeader, Pill, Table } from "../components/UI";
 import { Modal } from "../components/Modal";
 
+type DevicePollHealth = {
+  currentStatus: string;
+  lastPollAt: string | null;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  successCount: number;
+  failureCount: number;
+  lastError: string | null;
+  activeSnmpProfile: string | null;
+  activeSnmpPollerId: string | null;
+};
+
 type Device = {
   id: number;
   hostname: string;
@@ -9,6 +21,7 @@ type Device = {
   enabled: boolean;
   site?: string | null;
   org?: string | null;
+  pollHealth?: DevicePollHealth;
 };
 
 type Profile = { id: number; name: string; kind: "ping" | "snmp"; enabled: boolean };
@@ -276,6 +289,42 @@ export default function DevicesPage() {
           { key: "hostname", header: "Hostname" },
           { key: "ipAddress", header: "IP" },
           { key: "enabled", header: "Status", render: (d: Device) => <Pill status={d.enabled ? "enabled" : "disabled"} /> },
+          {
+            key: "poll-status",
+            header: "Current Poll Status",
+            render: (d: Device) => <Pill status={d.pollHealth?.currentStatus ?? "idle"} />,
+            minWidth: 150,
+          },
+          {
+            key: "last-poll",
+            header: "Last Poll",
+            render: (d: Device) => d.pollHealth?.lastPollAt ?? "—",
+            minWidth: 160,
+          },
+          {
+            key: "last-success",
+            header: "Last Success",
+            render: (d: Device) => d.pollHealth?.lastSuccessAt ?? "—",
+            minWidth: 160,
+          },
+          {
+            key: "last-failure",
+            header: "Last Failure",
+            render: (d: Device) => d.pollHealth?.lastFailureAt ?? "—",
+            minWidth: 160,
+          },
+          {
+            key: "active-profile",
+            header: "Active SNMP Profile",
+            render: (d: Device) => d.pollHealth?.activeSnmpProfile ?? "—",
+            minWidth: 160,
+          },
+          {
+            key: "last-error",
+            header: "Last Error",
+            render: (d: Device) => (d.pollHealth?.lastError ? String(d.pollHealth.lastError).slice(0, 80) : "—"),
+            minWidth: 200,
+          },
           { key: "site", header: "Site" },
           { key: "org", header: "Org" },
           {
@@ -319,6 +368,41 @@ export default function DevicesPage() {
             <p style={{ margin: "8px 0 0 0" }}>
               System: {snapshot?.sys_name ?? "—"} | {snapshot?.sys_descr ?? ""} | {snapshot?.sys_object_id ?? ""} | {snapshot?.sys_uptime ?? ""}
             </p>
+            <div className="detail-grid" style={{ marginTop: 10, display: "grid", gap: 8, gridTemplateColumns: "repeat(auto-fit, minmax(220px,1fr))" }}>
+              <div>
+                <div className="muted">Current Poll Status</div>
+                <Pill status={detailDevice.pollHealth?.currentStatus ?? "idle"} />
+              </div>
+              <div>
+                <div className="muted">Last polled</div>
+                <div>{detailDevice.pollHealth?.lastPollAt ?? "—"}</div>
+              </div>
+              <div>
+                <div className="muted">Last success</div>
+                <div>{detailDevice.pollHealth?.lastSuccessAt ?? "—"}</div>
+              </div>
+              <div>
+                <div className="muted">Last failure</div>
+                <div>{detailDevice.pollHealth?.lastFailureAt ?? "—"}</div>
+              </div>
+              <div>
+                <div className="muted">Success / Failure count</div>
+                <div>
+                  {detailDevice.pollHealth?.successCount ?? 0} / {detailDevice.pollHealth?.failureCount ?? 0}
+                </div>
+              </div>
+              <div>
+                <div className="muted">Active profile / poller</div>
+                <div>
+                  {detailDevice.pollHealth?.activeSnmpProfile ?? "—"}
+                  {detailDevice.pollHealth?.activeSnmpPollerId ? ` (${detailDevice.pollHealth.activeSnmpPollerId})` : ""}
+                </div>
+              </div>
+              <div style={{ gridColumn: "1 / -1" }}>
+                <div className="muted">Last error</div>
+                <div style={{ color: "#f87171" }}>{detailDevice.pollHealth?.lastError ?? "—"}</div>
+              </div>
+            </div>
             <p style={{ margin: "8px 0 0 0" }}>
               Readiness: <Pill status={detailTargets.length > 0 ? "ready" : promotionNote ? "needs target" : "needs profile"} />{" "}
               {detailTargets.length === 0 ? "Attach a profile/target to begin polling." : "Targets attached; enqueue a poll to collect."}

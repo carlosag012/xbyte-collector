@@ -492,6 +492,18 @@ export type DeviceRow = {
   updatedAt: string;
 };
 
+export type DevicePollHealth = {
+  currentStatus: string;
+  lastPollAt: string | null;
+  lastSuccessAt: string | null;
+  lastFailureAt: string | null;
+  successCount: number;
+  failureCount: number;
+  lastError: string | null;
+  activeSnmpProfile: string | null;
+  activeSnmpPollerId: string | null;
+};
+
 export function listDevices(db: DB): DeviceRow[] {
   const rows = db
     .prepare(
@@ -567,6 +579,104 @@ export function createDevice(db: DB, input: { hostname: string; ipAddress: strin
     org: input.org ?? null,
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+export function getDevicePollHealth(db: DB, deviceId: number): DevicePollHealth {
+  const latest = db
+    .prepare(
+      `SELECT pj.status, pj.finished_at as finishedAt, pj.started_at as startedAt, pj.scheduled_at as scheduledAt,
+              pj.created_at as createdAt, pj.result_json as resultJson,
+              pp.name as profileName, pp.kind as profileKind, pt.id as targetId, pp.id as profileId
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pt.id = pj.target_id
+       LEFT JOIN poll_profiles pp ON pp.id = pt.profile_id
+       WHERE pt.device_id = ?
+       ORDER BY pj.updated_at DESC
+       LIMIT 1`
+    )
+    .get(deviceId) as
+    | {
+        status: string;
+        finishedAt: string | null;
+        startedAt: string | null;
+        scheduledAt: string | null;
+        createdAt: string;
+        resultJson: string | null;
+        profileName: string | null;
+        profileKind: string | null;
+        targetId: number | null;
+        profileId: number | null;
+      }
+    | undefined;
+
+  const lastSuccess = db
+    .prepare(
+      `SELECT pj.finished_at as finishedAt
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pt.id = pj.target_id
+       WHERE pt.device_id = ? AND pj.status = 'completed'
+       ORDER BY pj.finished_at DESC, pj.updated_at DESC
+       LIMIT 1`
+    )
+    .get(deviceId) as { finishedAt: string | null } | undefined;
+
+  const lastFailureRow = db
+    .prepare(
+      `SELECT pj.finished_at as finishedAt, pj.result_json as resultJson
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pt.id = pj.target_id
+       WHERE pt.device_id = ? AND pj.status = 'failed'
+       ORDER BY pj.finished_at DESC, pj.updated_at DESC
+       LIMIT 1`
+    )
+    .get(deviceId) as { finishedAt: string | null; resultJson: string | null } | undefined;
+
+  const counts = db
+    .prepare(
+      `SELECT
+         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as successCount,
+         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failureCount
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pt.id = pj.target_id
+       WHERE pt.device_id = ?`
+    )
+    .get(deviceId) as { successCount: number; failureCount: number };
+
+  const activeSnmp = db
+    .prepare(
+      `SELECT pp.name as profileName, pt.id as targetId, pp.id as profileId
+       FROM poll_targets pt
+       JOIN poll_profiles pp ON pp.id = pt.profile_id
+       WHERE pt.device_id = ? AND pt.enabled = 1 AND pp.kind = 'snmp'
+       ORDER BY pt.updated_at DESC
+       LIMIT 1`
+    )
+    .get(deviceId) as { profileName: string | null; targetId: number | null; profileId: number | null } | undefined;
+
+  const parseResult = (json: string | null) => {
+    try {
+      return json ? JSON.parse(json) : null;
+    } catch {
+      return null;
+    }
+  };
+
+  const lastPollAt = latest?.finishedAt ?? latest?.startedAt ?? latest?.scheduledAt ?? latest?.createdAt ?? null;
+  const lastErrorObj = parseResult(lastFailureRow?.resultJson ?? latest?.resultJson ?? null);
+  const lastError =
+    lastErrorObj?.error || lastErrorObj?.message || lastErrorObj?.summary || (typeof lastErrorObj === "string" ? lastErrorObj : null);
+
+  return {
+    currentStatus: latest?.status ?? "idle",
+    lastPollAt,
+    lastSuccessAt: lastSuccess?.finishedAt ?? null,
+    lastFailureAt: lastFailureRow?.finishedAt ?? null,
+    successCount: counts?.successCount ?? 0,
+    failureCount: counts?.failureCount ?? 0,
+    lastError: lastError ?? null,
+    activeSnmpProfile: activeSnmp?.profileName ?? null,
+    activeSnmpPollerId: activeSnmp?.profileId ? `poller-${activeSnmp.profileId}` : null,
   };
 }
 
