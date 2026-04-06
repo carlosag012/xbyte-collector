@@ -42,7 +42,7 @@ async function sendRegister(cfg: AppConfig, db: DB): Promise<SyncResult> {
     summary,
   };
   const res = await postJson(
-    `${cfg.xmonApiBase.replace(/\\/+$/, "")}/appliances/register`,
+    `${cfg.xmonApiBase.replace(/\/+$/, "")}/appliances/register`,
     payload,
     { "x-xmon-api-key": cfg.xmonApiKey }
   );
@@ -70,7 +70,7 @@ async function sendHeartbeat(cfg: AppConfig, db: DB): Promise<SyncResult> {
     summary,
   };
   const res = await postJson(
-    `${cfg.xmonApiBase.replace(/\\/+$/, "")}/appliances/heartbeat`,
+    `${cfg.xmonApiBase.replace(/\/+$/, "")}/appliances/heartbeat`,
     payload,
     { "x-xmon-api-key": cfg.xmonApiKey }
   );
