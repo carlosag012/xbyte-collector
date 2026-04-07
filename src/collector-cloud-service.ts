@@ -86,7 +86,14 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
 
       // Seed device_state with last known poll health so xMon starts with real status
       const health = getDevicePollHealth(db, d.id);
-      const status = health.currentStatus === "completed" ? "up" : health.currentStatus === "failed" ? "down" : "unknown";
+      // Derive status from latest known outcome, falling back to currentStatus
+      const lastSuccess = health.lastSuccessAt ? new Date(health.lastSuccessAt) : null;
+      const lastFailure = health.lastFailureAt ? new Date(health.lastFailureAt) : null;
+      let status: "up" | "down" | "unknown" = "unknown";
+      if (lastSuccess && (!lastFailure || lastSuccess > lastFailure)) status = "up";
+      else if (lastFailure && (!lastSuccess || lastFailure > lastSuccess)) status = "down";
+      else if (health.currentStatus === "completed") status = "up";
+      else if (health.currentStatus === "failed") status = "down";
       enqueueDeviceState({
         deviceId: String(d.id),
         status,
