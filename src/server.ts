@@ -157,18 +157,47 @@ function startCloudBridgeIfReady(db: DB) {
 function startPollScheduler(db: DB) {
   if (pollSchedulerHandle) return;
   const intervalMs = 30000; // minimal scheduler, 30s
+  const FAILURE_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes to avoid hammering bad targets
+  const RETAIN_POLL_JOBS = 10_000; // keep latest 10k jobs
+  const hasActiveStmt = db.prepare(
+    `SELECT COUNT(*) as cnt FROM poll_jobs WHERE target_id = ? AND status IN ('pending','running')`
+  );
+  const latestJobStmt = db.prepare(
+    `SELECT status, finished_at as finishedAt, updated_at as updatedAt
+     FROM poll_jobs
+     WHERE target_id = ?
+     ORDER BY updated_at DESC
+     LIMIT 1`
+  );
+  const retentionCutoffStmt = db.prepare(
+    `SELECT id FROM poll_jobs ORDER BY id DESC LIMIT 1 OFFSET ?`
+  );
+  const deleteOldStmt = db.prepare(
+    `DELETE FROM poll_jobs WHERE id < ?`
+  );
   pollSchedulerHandle = setInterval(() => {
     try {
       if (!licenseAllowsCollection(db).allowed) return;
       const enabledTargets = listEnabledPollTargets(db);
       if (!enabledTargets.length) return;
-      const hasActiveStmt = db.prepare(
-        `SELECT COUNT(*) as cnt FROM poll_jobs WHERE target_id = ? AND status IN ('pending','running')`
-      );
+      const nowMs = Date.now();
       for (const t of enabledTargets) {
         const row = hasActiveStmt.get(t.id) as { cnt: number };
         if (row?.cnt && row.cnt > 0) continue;
+        const latest = latestJobStmt.get(t.id) as { status?: string; finishedAt?: string | null; updatedAt?: string } | undefined;
+        if (latest?.status === "failed") {
+          const ts = latest.finishedAt || latest.updatedAt;
+          if (ts) {
+            const ageMs = nowMs - new Date(ts).getTime();
+            if (ageMs < FAILURE_COOLDOWN_MS) continue;
+          }
+        }
         enqueuePollJobForTarget(db, t.id);
+      }
+      // prune oldest jobs to keep table bounded
+      const cutoff = retentionCutoffStmt.get(RETAIN_POLL_JOBS - 1) as { id?: number } | undefined;
+      if (cutoff?.id) {
+        deleteOldStmt.run(cutoff.id);
       }
     } catch (err: any) {
       // best-effort; do not crash server
