@@ -2349,7 +2349,7 @@ const server = createServer((req, res) => {
       const leaseOwner = leaseOwnerRaw === null ? undefined : leaseOwnerRaw;
       const jobs = listPollJobs(db, status as any, leaseOwner ?? undefined);
       res.writeHead(200);
-      res.end(JSON.stringify({ ok: true, jobs }));
+      res.end(JSON.stringify({ ok: true, jobs, limited: true }));
     } catch {
       res.writeHead(500);
       res.end(JSON.stringify({ ok: false, error: "db_error" }));

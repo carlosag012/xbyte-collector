@@ -41,7 +41,10 @@ export default function JobsPage({ licensing }: { licensing?: Licensing }) {
       fetch("/api/poll-profiles", { credentials: "include" }),
       fetch("/api/neighbors", { credentials: "include" }),
     ]);
-    if (jRes.ok) setJobs((await jRes.json()).jobs ?? []);
+    if (jRes.ok) {
+      const data = await jRes.json();
+      setJobs(data.jobs ?? []);
+    }
     if (tRes.ok) setTargets((await tRes.json()).targets ?? []);
     if (dRes.ok) setDevices((await dRes.json()).devices ?? []);
     if (pRes.ok) setProfiles((await pRes.json()).profiles ?? []);

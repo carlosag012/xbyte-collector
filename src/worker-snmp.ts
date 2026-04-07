@@ -289,19 +289,23 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
           deviceId: detail.device.id,
           name: detail.device.hostname,
           deviceType: detail.device.type ?? detail.device.kind ?? undefined,
-          status: res.success ? "up" : "unknown",
+          status: res.success ? "up" : "down",
           snmpProfileId: detail.profile?.id ? String(detail.profile.id) : null,
           snmpPollerIds: detail.profile?.id ? [`poller-${detail.profile.id}`] : undefined,
-          successCount,
-          failureCount: failCount,
+          successCount: res.success ? 1 : 0,
+          failureCount: res.success ? 0 : 1,
           ts: processedAt,
         });
         enqueueDeviceState({
           deviceId: detail.device.id,
-          status: res.success ? "up" : "unknown",
+          status: res.success ? "up" : "down",
           successCountDelta: res.success ? 1 : 0,
           failureCountDelta: res.success ? 0 : 1,
           ts: processedAt,
+          lastSuccessAt: res.success ? processedAt : undefined,
+          lastFailureAt: res.success ? undefined : processedAt,
+          lastPollAt: processedAt,
+          lastError: res.success ? null : res.error ?? null,
         });
 
         log({

@@ -2066,6 +2066,9 @@ export function listPollJobs(db: DB, status?: "pending" | "running" | "completed
   const clauses: string[] = [];
   const params: any[] = [];
 
+  // limit result size to keep Jobs page responsive
+  const LIMIT = 500;
+
   if (status) {
     clauses.push("status = ?");
     params.push(status);
@@ -2082,7 +2085,7 @@ export function listPollJobs(db: DB, status?: "pending" | "running" | "completed
       `SELECT id, target_id as targetId, status, scheduled_at as scheduledAt,
               started_at as startedAt, finished_at as finishedAt, lease_owner as leaseOwner,
               attempt_count as attemptCount, result_json as resultJson, created_at as createdAt, updated_at as updatedAt
-       FROM poll_jobs${where} ORDER BY id`
+       FROM poll_jobs${where} ORDER BY id DESC LIMIT ${LIMIT}`
     )
     .all(...params) as PollJobRowRaw[];
   return rows.map(mapPollJobRow);
