@@ -159,6 +159,7 @@ function startPollScheduler(db: DB) {
   const intervalMs = 30000; // minimal scheduler, 30s
   const FAILURE_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes to avoid hammering bad targets
   const RETAIN_POLL_JOBS = 10_000; // keep latest 10k jobs
+  const PREFERRED_SNMP_SUCCESS_MS = 15 * 60 * 1000; // prefer a recently successful SNMP target for a device
   const hasActiveStmt = db.prepare(
     `SELECT COUNT(*) as cnt FROM poll_jobs WHERE target_id = ? AND status IN ('pending','running')`
   );
@@ -175,20 +176,52 @@ function startPollScheduler(db: DB) {
   const deleteOldStmt = db.prepare(
     `DELETE FROM poll_jobs WHERE id < ?`
   );
+  const lastSuccessForTargetStmt = db.prepare(
+    `SELECT finished_at as finishedAt, updated_at as updatedAt
+     FROM poll_jobs
+     WHERE target_id = ? AND status = 'completed'
+     ORDER BY updated_at DESC
+     LIMIT 1`
+  );
   pollSchedulerHandle = setInterval(() => {
     try {
       if (!licenseAllowsCollection(db).allowed) return;
       const enabledTargets = listEnabledPollTargets(db);
-      if (!enabledTargets.length) return;
+      const profiles = listPollProfiles(db);
+      const profileKind = new Map<number, string>();
+      profiles.forEach((p) => profileKind.set(p.id, p.kind));
+      // Pick a preferred SNMP target per device based on recent success
+      const preferredSnmpTargetByDevice = new Map<number, { targetId: number; tsMs: number }>();
       const nowMs = Date.now();
       for (const t of enabledTargets) {
+        if (profileKind.get(t.profileId)?.toLowerCase() !== "snmp") continue;
+        const lastSucc = lastSuccessForTargetStmt.get(t.id) as { finishedAt?: string | null; updatedAt?: string } | undefined;
+        const tsStr = lastSucc?.finishedAt || lastSucc?.updatedAt;
+        if (!tsStr) continue;
+        const tsMs = new Date(tsStr).getTime();
+        if (Number.isNaN(tsMs)) continue;
+        if (nowMs - tsMs > PREFERRED_SNMP_SUCCESS_MS) continue;
+        const existing = preferredSnmpTargetByDevice.get(t.deviceId);
+        if (!existing || tsMs > existing.tsMs) {
+          preferredSnmpTargetByDevice.set(t.deviceId, { targetId: t.id, tsMs });
+        }
+      }
+      if (!enabledTargets.length) return;
+      const nowMsLoop = nowMs;
+      for (const t of enabledTargets) {
+        const kind = profileKind.get(t.profileId)?.toLowerCase();
+        const preferred = preferredSnmpTargetByDevice.get(t.deviceId);
+        if (kind === "snmp" && preferred && preferred.targetId !== t.id) {
+          // Skip alternate SNMP targets while a recent successful one exists
+          continue;
+        }
         const row = hasActiveStmt.get(t.id) as { cnt: number };
         if (row?.cnt && row.cnt > 0) continue;
         const latest = latestJobStmt.get(t.id) as { status?: string; finishedAt?: string | null; updatedAt?: string } | undefined;
         if (latest?.status === "failed") {
           const ts = latest.finishedAt || latest.updatedAt;
           if (ts) {
-            const ageMs = nowMs - new Date(ts).getTime();
+            const ageMs = nowMsLoop - new Date(ts).getTime();
             if (ageMs < FAILURE_COOLDOWN_MS) continue;
           }
         }
