@@ -162,6 +162,7 @@ function startPollScheduler(db: DB) {
   const PREFERRED_SNMP_SUCCESS_MS = 15 * 60 * 1000; // prefer a recently successful SNMP target for a device
   const LOSS_WINDOW_MS = 30 * 60 * 1000; // evaluate losing targets in this window
   const LOSS_FAILURE_THRESHOLD = 3; // failures needed to auto-suppress
+  const GRACE_AFTER_MANUAL_ENABLE_MS = 10 * 60 * 1000; // grace after manual re-enable before auto-suppressing again
   const hasActiveStmt = db.prepare(
     `SELECT COUNT(*) as cnt FROM poll_jobs WHERE target_id = ? AND status IN ('pending','running')`
   );
@@ -231,6 +232,11 @@ function startPollScheduler(db: DB) {
         const preferred = preferredSnmpTargetByDevice.get(t.deviceId);
         if (kind === "snmp" && preferred && preferred.targetId !== t.id) {
           // Auto-suppress persistently losing alternates when another target is succeeding
+          const updatedMs = new Date(t.updatedAt).getTime();
+          if (!Number.isNaN(updatedMs) && nowMsLoop - updatedMs < GRACE_AFTER_MANUAL_ENABLE_MS) {
+            // Skip suppression during grace after manual enable
+            continue;
+          }
           const siblings = deviceSnmpTargets.get(t.deviceId) ?? [];
           if (siblings.length > 1) {
             const succRow = successCountWindowStmt.get(t.id, lossWindowIso) as { cnt: number } | undefined;
