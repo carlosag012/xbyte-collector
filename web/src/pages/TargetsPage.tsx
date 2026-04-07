@@ -16,6 +16,7 @@ export default function TargetsPage() {
   const [relations, setRelations] = useState<Record<number, string>>({});
   const [history, setHistory] = useState<any[]>([]);
   const [historyFor, setHistoryFor] = useState<Target | null>(null);
+  const [suppressedInfo, setSuppressedInfo] = useState<Record<number, { note?: string | null; createdAt?: string }>>({});
   const toast = useToast();
 
   useEffect(() => {
@@ -23,11 +24,12 @@ export default function TargetsPage() {
   }, []);
 
   async function loadAll() {
-    const [d, p, t, n] = await Promise.all([
+    const [d, p, t, n, a] = await Promise.all([
       fetch("/api/devices", { credentials: "include" }),
       fetch("/api/poll-profiles", { credentials: "include" }),
       fetch("/api/poll-targets", { credentials: "include" }),
       fetch("/api/neighbors", { credentials: "include" }),
+      fetch("/api/audit?entityType=target&action=auto_suppress&limit=500", { credentials: "include" }),
     ]);
     if (d.ok) setDevices((await d.json()).devices ?? []);
     if (p.ok) setProfiles((await p.json()).profiles ?? []);
@@ -40,6 +42,16 @@ export default function TargetsPage() {
         if (neigh.linkedDeviceId) map[neigh.linkedDeviceId] = "linked";
       });
       setRelations(map);
+    }
+    if (a.ok) {
+      const data = await a.json();
+      const map: Record<number, { note?: string | null; createdAt?: string }> = {};
+      (data.events ?? []).forEach((ev: any) => {
+        const id = ev?.entityId;
+        if (!id) return;
+        if (!map[id]) map[id] = { note: ev.note ?? null, createdAt: ev.createdAt };
+      });
+      setSuppressedInfo(map);
     }
   }
 
@@ -201,7 +213,16 @@ export default function TargetsPage() {
           {
             key: "enabled",
             header: "Status",
-            render: (t: Target) => <Pill status={t.enabled ? "enabled" : "disabled"} label={t.enabled ? "Enabled" : "Suppressed"} />,
+            render: (t: Target) => (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                <Pill status={t.enabled ? "enabled" : "disabled"} label={t.enabled ? "Enabled" : "Suppressed"} />
+                {!t.enabled && suppressedInfo[t.id] && (
+                  <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.3 }}>
+                    {suppressedInfo[t.id].note || "Auto-suppressed"} · {suppressedInfo[t.id].createdAt || ""}
+                  </div>
+                )}
+              </div>
+            ),
           },
           {
             key: "actions",
