@@ -4,8 +4,8 @@ import type { DB } from "./db.js";
 import { setLicenseState } from "./db.js";
 import { sendPing, fetchCollectorConfig, type CloudAuthState } from "./xmon-client.js";
 import { enqueueTelemetry, startTelemetryQueue } from "./telemetry-queue.js";
-import { listDevices, listPollProfiles, listPollTargets, updateCloudSyncState, upsertAppConfigEntries } from "./db.js";
-import { enqueueDeviceSnapshot, enqueueSnmpProfileSnapshot, enqueueSnmpPollerSnapshot } from "./telemetry-queue.js";
+import { getDevicePollHealth, listDevices, listPollProfiles, listPollTargets, updateCloudSyncState, upsertAppConfigEntries } from "./db.js";
+import { enqueueDeviceSnapshot, enqueueDeviceState, enqueueSnmpProfileSnapshot, enqueueSnmpPollerSnapshot } from "./telemetry-queue.js";
 
 type BackoffState = { attempts: number };
 
@@ -63,6 +63,7 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
       targetsByDevice.get(t.deviceId)!.push(t);
     });
     devices.forEach((d) => {
+      const ts = new Date().toISOString();
       const deviceTargets = targetsByDevice.get(d.id) ?? [];
       const snmpProfileId =
         deviceTargets.find((t) => profiles.some((p) => p.id === t.profileId))?.profileId ??
@@ -80,7 +81,22 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
         snmpPollerIds: snmpPollerIds.length ? snmpPollerIds.map(String) : null,
         successCount: 0,
         failureCount: 0,
-        ts: new Date().toISOString(),
+        ts,
+      });
+
+      // Seed device_state with last known poll health so xMon starts with real status
+      const health = getDevicePollHealth(db, d.id);
+      const status = health.currentStatus === "completed" ? "up" : health.currentStatus === "failed" ? "down" : "unknown";
+      enqueueDeviceState({
+        deviceId: String(d.id),
+        status,
+        successCountDelta: 0,
+        failureCountDelta: 0,
+        ts,
+        lastPollAt: health.lastPollAt ?? undefined,
+        lastSuccessAt: health.lastSuccessAt ?? undefined,
+        lastFailureAt: health.lastFailureAt ?? undefined,
+        lastError: health.lastError ?? null,
       });
     });
     profiles.forEach((p) => {
