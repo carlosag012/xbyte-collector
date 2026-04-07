@@ -66,57 +66,74 @@ export async function sendPing(cfg: AppConfig): Promise<{ state: CloudAuthState;
     };
   }
 
-  const res = await doFetch(`${cfg.xmonApiBase}/collectors/${encodeURIComponent(cfg.xmonCollectorId)}/ping`, {
-    method: "POST",
-    body: JSON.stringify({ ts: new Date().toISOString() }),
-    headers: { "x-xmon-api-key": cfg.xmonApiKey },
-  });
+  try {
+    const res = await doFetch(`${cfg.xmonApiBase}/collectors/${encodeURIComponent(cfg.xmonCollectorId)}/ping`, {
+      method: "POST",
+      body: JSON.stringify({ ts: new Date().toISOString() }),
+      headers: { "x-xmon-api-key": cfg.xmonApiKey },
+    });
 
-  if (res.status === 429) {
-    const retryAfter = Number(res.headers.get("retry-after")) || undefined;
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get("retry-after")) || undefined;
+      return {
+        ok: false,
+        retryAfterSec: retryAfter,
+        state: {
+          authorized: false,
+          collectionAllowed: false,
+          licenseStatus: "rate_limited",
+          effectiveUntil: null,
+          reason: "rate_limited",
+          lastCheckedAt: new Date().toISOString(),
+        },
+      };
+    }
+
+    if (!res.ok) {
+      return {
+        ok: false,
+        state: {
+          authorized: false,
+          collectionAllowed: false,
+          licenseStatus: "unauthorized",
+          effectiveUntil: null,
+          reason: `http_${res.status}`,
+          lastCheckedAt: new Date().toISOString(),
+        },
+      };
+    }
+
+    const body = (await res.json().catch(() => ({}))) as PingResponse;
+    const authorized = body.authorized !== false;
+    const collectionAllowed = body.collectionAllowed !== false && authorized;
+
+    return {
+      ok: true,
+      state: {
+        authorized,
+        collectionAllowed,
+        licenseStatus: body.licenseStatus ?? null,
+        effectiveUntil: body.effectiveUntil ?? null,
+        reason: body.reason ?? null,
+        lastCheckedAt: new Date().toISOString(),
+      },
+    };
+  } catch (error) {
+    const code = (error as any)?.code || (error as any)?.cause?.code;
+    const message = error instanceof Error ? error.message : undefined;
+    const reason = (code || message || "network_error") as string;
     return {
       ok: false,
-      retryAfterSec: retryAfter,
       state: {
         authorized: false,
         collectionAllowed: false,
-        licenseStatus: "rate_limited",
+        licenseStatus: "unreachable",
         effectiveUntil: null,
-        reason: "rate_limited",
+        reason,
         lastCheckedAt: new Date().toISOString(),
       },
     };
   }
-
-  if (!res.ok) {
-    return {
-      ok: false,
-      state: {
-        authorized: false,
-        collectionAllowed: false,
-        licenseStatus: "unauthorized",
-        effectiveUntil: null,
-        reason: `http_${res.status}`,
-        lastCheckedAt: new Date().toISOString(),
-      },
-    };
-  }
-
-  const body = (await res.json().catch(() => ({}))) as PingResponse;
-  const authorized = body.authorized !== false;
-  const collectionAllowed = body.collectionAllowed !== false && authorized;
-
-  return {
-    ok: true,
-    state: {
-      authorized,
-      collectionAllowed,
-      licenseStatus: body.licenseStatus ?? null,
-      effectiveUntil: body.effectiveUntil ?? null,
-      reason: body.reason ?? null,
-      lastCheckedAt: new Date().toISOString(),
-    },
-  };
 }
 
 export async function activateAppliance(apiBase: string, payload: { licenseKey: string; hostname?: string; fingerprint?: string; applianceName?: string }) {
@@ -130,29 +147,37 @@ export async function activateAppliance(apiBase: string, payload: { licenseKey: 
 
 export async function fetchCollectorConfig(cfg: AppConfig): Promise<{ config: any | null; retryAfterSec?: number }> {
   if (!cfg.xmonCollectorId || !cfg.xmonApiKey) return { config: null };
-  const res = await doFetch(`${cfg.xmonApiBase}/collectors/${encodeURIComponent(cfg.xmonCollectorId)}/config`, {
-    method: "GET",
-    headers: { "x-xmon-api-key": cfg.xmonApiKey },
-  });
-  if (res.status === 429) {
-    const retryAfter = Number(res.headers.get("retry-after")) || undefined;
-    return { config: null, retryAfterSec: retryAfter };
+  try {
+    const res = await doFetch(`${cfg.xmonApiBase}/collectors/${encodeURIComponent(cfg.xmonCollectorId)}/config`, {
+      method: "GET",
+      headers: { "x-xmon-api-key": cfg.xmonApiKey },
+    });
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get("retry-after")) || undefined;
+      return { config: null, retryAfterSec: retryAfter };
+    }
+    if (!res.ok) return { config: null };
+    const body = (await res.json().catch(() => ({}))) as ConfigResponse;
+    return { config: body?.config ?? null };
+  } catch {
+    return { config: null };
   }
-  if (!res.ok) return { config: null };
-  const body = (await res.json().catch(() => ({}))) as ConfigResponse;
-  return { config: body?.config ?? null };
 }
 
 export async function sendTelemetry(cfg: AppConfig, payload: unknown): Promise<{ ok: boolean; retryAfterSec?: number }> {
   if (!cfg.xmonCollectorId || !cfg.xmonApiKey) return { ok: false };
-  const res = await doFetch(`${cfg.xmonApiBase}/collectors/${encodeURIComponent(cfg.xmonCollectorId)}/telemetry`, {
-    method: "POST",
-    headers: { "x-xmon-api-key": cfg.xmonApiKey },
-    body: JSON.stringify(payload ?? {}),
-  });
-  if (res.status === 429) {
-    const retryAfter = Number(res.headers.get("retry-after")) || undefined;
-    return { ok: false, retryAfterSec: retryAfter };
+  try {
+    const res = await doFetch(`${cfg.xmonApiBase}/collectors/${encodeURIComponent(cfg.xmonCollectorId)}/telemetry`, {
+      method: "POST",
+      headers: { "x-xmon-api-key": cfg.xmonApiKey },
+      body: JSON.stringify(payload ?? {}),
+    });
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get("retry-after")) || undefined;
+      return { ok: false, retryAfterSec: retryAfter };
+    }
+    return { ok: res.ok };
+  } catch {
+    return { ok: false };
   }
-  return { ok: res.ok };
 }
