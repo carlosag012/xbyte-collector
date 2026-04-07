@@ -163,6 +163,7 @@ function startPollScheduler(db: DB) {
   const LOSS_WINDOW_MS = 30 * 60 * 1000; // evaluate losing targets in this window
   const LOSS_FAILURE_THRESHOLD = 3; // failures needed to auto-suppress
   const GRACE_AFTER_MANUAL_ENABLE_MS = 10 * 60 * 1000; // grace after manual re-enable before auto-suppressing again
+  const STALE_RUNNING_SEC = 10 * 60; // recover running jobs older than 10 minutes
   const hasActiveStmt = db.prepare(
     `SELECT COUNT(*) as cnt FROM poll_jobs WHERE target_id = ? AND status IN ('pending','running')`
   );
@@ -201,6 +202,8 @@ function startPollScheduler(db: DB) {
       const profiles = listPollProfiles(db);
       const profileKind = new Map<number, string>();
       profiles.forEach((p) => profileKind.set(p.id, p.kind));
+      // Recover stale running jobs globally (lightweight)
+      requeueStaleRunningPollJobs(db, STALE_RUNNING_SEC);
       // Pick a preferred SNMP target per device based on recent success
       const preferredSnmpTargetByDevice = new Map<number, { targetId: number; tsMs: number }>();
       const nowMs = Date.now();
