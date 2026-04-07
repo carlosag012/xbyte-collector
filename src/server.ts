@@ -238,7 +238,17 @@ function startPollScheduler(db: DB) {
             const succCnt = succRow?.cnt ?? 0;
             const failCnt = failRow?.cnt ?? 0;
             if (succCnt === 0 && failCnt >= LOSS_FAILURE_THRESHOLD) {
+              const before = getPollTargetById(db, t.id);
               updatePollTarget(db, { id: t.id, enabled: false });
+              const after = getPollTargetById(db, t.id);
+              logAdminAuditEvent(db, {
+                entityType: "target",
+                entityId: t.id,
+                action: "auto_suppress",
+                note: `failed ${failCnt} in ${LOSS_WINDOW_MS / 60000}m while another target succeeds`,
+                before,
+                after,
+              });
               logger.warn("snmp target auto-suppressed", {
                 targetId: t.id,
                 deviceId: t.deviceId,

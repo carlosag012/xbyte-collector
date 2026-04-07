@@ -198,7 +198,11 @@ export default function TargetsPage() {
             render: (t: Target) =>
               relations[t.deviceId] ? <Pill status={relations[t.deviceId]} /> : <span style={{ color: "var(--muted)" }}>—</span>,
           },
-          { key: "enabled", header: "Status", render: (t: Target) => <Pill status={t.enabled ? "enabled" : "disabled"} /> },
+          {
+            key: "enabled",
+            header: "Status",
+            render: (t: Target) => <Pill status={t.enabled ? "enabled" : "disabled"} label={t.enabled ? "Enabled" : "Suppressed"} />,
+          },
           {
             key: "actions",
             header: "Actions",
