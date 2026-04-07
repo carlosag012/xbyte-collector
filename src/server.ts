@@ -160,6 +160,8 @@ function startPollScheduler(db: DB) {
   const FAILURE_COOLDOWN_MS = 5 * 60 * 1000; // 5 minutes to avoid hammering bad targets
   const RETAIN_POLL_JOBS = 10_000; // keep latest 10k jobs
   const PREFERRED_SNMP_SUCCESS_MS = 15 * 60 * 1000; // prefer a recently successful SNMP target for a device
+  const LOSS_WINDOW_MS = 30 * 60 * 1000; // evaluate losing targets in this window
+  const LOSS_FAILURE_THRESHOLD = 3; // failures needed to auto-suppress
   const hasActiveStmt = db.prepare(
     `SELECT COUNT(*) as cnt FROM poll_jobs WHERE target_id = ? AND status IN ('pending','running')`
   );
@@ -182,6 +184,14 @@ function startPollScheduler(db: DB) {
      WHERE target_id = ? AND status = 'completed'
      ORDER BY updated_at DESC
      LIMIT 1`
+  );
+  const successCountWindowStmt = db.prepare(
+    `SELECT COUNT(*) as cnt FROM poll_jobs
+     WHERE target_id = ? AND status = 'completed' AND updated_at > ?`
+  );
+  const failureCountWindowStmt = db.prepare(
+    `SELECT COUNT(*) as cnt FROM poll_jobs
+     WHERE target_id = ? AND status = 'failed' AND updated_at > ?`
   );
   pollSchedulerHandle = setInterval(() => {
     try {
@@ -208,10 +218,36 @@ function startPollScheduler(db: DB) {
       }
       if (!enabledTargets.length) return;
       const nowMsLoop = nowMs;
+      const lossWindowIso = new Date(nowMsLoop - LOSS_WINDOW_MS).toISOString();
+      const deviceSnmpTargets = new Map<number, number[]>();
+      for (const t of enabledTargets) {
+        if (profileKind.get(t.profileId)?.toLowerCase() === "snmp") {
+          if (!deviceSnmpTargets.has(t.deviceId)) deviceSnmpTargets.set(t.deviceId, []);
+          deviceSnmpTargets.get(t.deviceId)!.push(t.id);
+        }
+      }
       for (const t of enabledTargets) {
         const kind = profileKind.get(t.profileId)?.toLowerCase();
         const preferred = preferredSnmpTargetByDevice.get(t.deviceId);
         if (kind === "snmp" && preferred && preferred.targetId !== t.id) {
+          // Auto-suppress persistently losing alternates when another target is succeeding
+          const siblings = deviceSnmpTargets.get(t.deviceId) ?? [];
+          if (siblings.length > 1) {
+            const succRow = successCountWindowStmt.get(t.id, lossWindowIso) as { cnt: number } | undefined;
+            const failRow = failureCountWindowStmt.get(t.id, lossWindowIso) as { cnt: number } | undefined;
+            const succCnt = succRow?.cnt ?? 0;
+            const failCnt = failRow?.cnt ?? 0;
+            if (succCnt === 0 && failCnt >= LOSS_FAILURE_THRESHOLD) {
+              updatePollTarget(db, { id: t.id, enabled: false });
+              logger.warn("snmp target auto-suppressed", {
+                targetId: t.id,
+                deviceId: t.deviceId,
+                failures: failCnt,
+                windowMs: LOSS_WINDOW_MS,
+              });
+              continue;
+            }
+          }
           // Skip alternate SNMP targets while a recent successful one exists
           continue;
         }
