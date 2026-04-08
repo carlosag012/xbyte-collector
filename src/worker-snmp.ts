@@ -256,9 +256,9 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
                 try {
                   persistDiscoveryNormalization(db, detail.device.id, res.discovery, processedAt);
                 } catch (err: any) {
-                  status = "failed";
-                  res.success = false;
-                  res.error = err?.message ?? "snmp_persistence_failed";
+                  // treat as partial warning; keep core success
+                  res.warnings = [...(res.warnings ?? []), err?.message ?? "snmp_persistence_failed"];
+                  res.error = res.error ?? err?.message ?? "snmp_persistence_failed";
                 }
               }
 
@@ -274,6 +274,7 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
                   summary: res.summary,
                   discovery: res.discovery,
                   error: res.error,
+                  warnings: res.warnings,
                   context: {
                     jobId: detail.job.id,
                     targetId: detail.target.id,
@@ -430,7 +431,7 @@ main().catch((err) => {
   process.exit(1);
 });
 
-async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<{ success: boolean; summary: any; discovery: any; error?: string }> {
+async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<{ success: boolean; summary: any; discovery: any; error?: string; warnings?: string[] }> {
   const target = detail.device.ipAddress;
   const profileConfig = (detail.profile?.config ?? {}) as any;
   const timeoutMs = typeof detail.profile.timeoutMs === "number" ? detail.profile.timeoutMs : 2000;
@@ -471,6 +472,7 @@ async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<{ s
         lldpNeighbors,
       },
       error: errors.length ? errors.join("; ") : undefined,
+      warnings: errors.length ? errors : undefined,
     };
   } catch (err: any) {
     return {

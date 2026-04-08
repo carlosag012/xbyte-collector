@@ -164,6 +164,7 @@ function startPollScheduler(db: DB) {
   const LOSS_FAILURE_THRESHOLD = 3; // failures needed to auto-suppress
   const GRACE_AFTER_MANUAL_ENABLE_MS = 10 * 60 * 1000; // grace after manual re-enable before auto-suppressing again
   const STALE_RUNNING_SEC = 10 * 60; // recover running jobs older than 10 minutes
+  const PING_FAIL_SNMP_BACKOFF_MS = 24 * 60 * 60 * 1000; // when ping failing, only try SNMP once per day
   const hasActiveStmt = db.prepare(
     `SELECT COUNT(*) as cnt FROM poll_jobs WHERE target_id = ? AND status IN ('pending','running')`
   );
@@ -204,6 +205,23 @@ function startPollScheduler(db: DB) {
       profiles.forEach((p) => profileKind.set(p.id, p.kind));
       // Recover stale running jobs globally (lightweight)
       requeueStaleRunningPollJobs(db, STALE_RUNNING_SEC);
+      // Latest ping result per device (authoritative availability)
+      const latestPingRows = db
+        .prepare(
+          `SELECT pt.device_id as deviceId, pj.status, pj.updated_at as updatedAt
+           FROM poll_jobs pj
+           JOIN poll_targets pt ON pt.id = pj.target_id
+           JOIN poll_profiles pp ON pp.id = pt.profile_id
+           WHERE pp.kind = 'ping' AND pj.status IN ('completed','failed')
+           ORDER BY pj.updated_at DESC`
+        )
+        .all() as Array<{ deviceId: number; status: string; updatedAt: string }>;
+      const latestPingByDevice = new Map<number, { status: string; updatedMs: number }>();
+      for (const row of latestPingRows) {
+        if (latestPingByDevice.has(row.deviceId)) continue;
+        const ms = new Date(row.updatedAt).getTime();
+        latestPingByDevice.set(row.deviceId, { status: row.status, updatedMs: ms });
+      }
       // Pick a preferred SNMP target per device based on recent success
       const preferredSnmpTargetByDevice = new Map<number, { targetId: number; tsMs: number }>();
       const nowMs = Date.now();
@@ -233,6 +251,12 @@ function startPollScheduler(db: DB) {
       for (const t of enabledTargets) {
         const kind = profileKind.get(t.profileId)?.toLowerCase();
         const preferred = preferredSnmpTargetByDevice.get(t.deviceId);
+        let latestJob: { status?: string; finishedAt?: string | null; updatedAt?: string } | undefined;
+        const getLatestJob = () => {
+          if (latestJob !== undefined) return latestJob;
+          latestJob = latestJobStmt.get(t.id) as { status?: string; finishedAt?: string | null; updatedAt?: string } | undefined;
+          return latestJob;
+        };
         if (kind === "snmp" && preferred && preferred.targetId !== t.id) {
           // Auto-suppress persistently losing alternates when another target is succeeding
           const updatedMs = new Date(t.updatedAt).getTime();
@@ -272,7 +296,17 @@ function startPollScheduler(db: DB) {
         }
         const row = hasActiveStmt.get(t.id) as { cnt: number };
         if (row?.cnt && row.cnt > 0) continue;
-        const latest = latestJobStmt.get(t.id) as { status?: string; finishedAt?: string | null; updatedAt?: string } | undefined;
+        const latest = getLatestJob();
+        // Ping-fail backoff for SNMP
+        if (kind === "snmp") {
+          const pingInfo = latestPingByDevice.get(t.deviceId);
+          if (pingInfo && pingInfo.status === "failed") {
+            const lastSnmpUpdated = latest?.updatedAt ? new Date(latest.updatedAt).getTime() : null;
+            if (lastSnmpUpdated && nowMsLoop - lastSnmpUpdated < PING_FAIL_SNMP_BACKOFF_MS) {
+              continue;
+            }
+          }
+        }
         if (latest?.status === "failed") {
           const ts = latest.finishedAt || latest.updatedAt;
           if (ts) {
