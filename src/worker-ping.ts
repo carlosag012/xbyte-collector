@@ -321,13 +321,15 @@ async function main() {
   const config = loadConfig();
   const db = initDatabase(config);
   const saved = getAllAppConfig(db);
-  const effectiveConfig = {
-    ...config,
-    xmonApiBase: saved["XMON_API_BASE"] || config.xmonApiBase,
-    xmonCollectorId: saved["XMON_COLLECTOR_ID"] || config.xmonCollectorId,
-    xmonApiKey: saved["XMON_API_KEY"] || config.xmonApiKey,
-  };
-  startTelemetryQueue(effectiveConfig);
+  startTelemetryQueue(() => {
+    const latest = getAllAppConfig(db);
+    return {
+      ...config,
+      xmonApiBase: latest["XMON_API_BASE"] || config.xmonApiBase,
+      xmonCollectorId: latest["XMON_COLLECTOR_ID"] || config.xmonCollectorId,
+      xmonApiKey: latest["XMON_API_KEY"] || config.xmonApiKey,
+    };
+  });
   const shuttingDown = { flag: false };
 
   const shutdown = async (signal: string) => {

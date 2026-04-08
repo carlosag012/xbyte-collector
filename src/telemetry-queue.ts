@@ -128,7 +128,7 @@ export function enqueueSnmpPollerSnapshot(item: {
   });
 }
 
-export function startTelemetryQueue(cfg: AppConfig) {
+export function startTelemetryQueue(resolveCfg: () => AppConfig) {
   setInterval(async () => {
     if (flushing) return;
     if (retryUntil && Date.now() < retryUntil) return;
@@ -136,6 +136,7 @@ export function startTelemetryQueue(cfg: AppConfig) {
     flushing = true;
     try {
       const batch = queue.splice(0, MAX_BATCH);
+      const cfg = resolveCfg();
       const res = await sendTelemetry(cfg, batch);
       if (!res.ok && res.retryAfterSec) {
         retryUntil = Date.now() + res.retryAfterSec * 1000;
