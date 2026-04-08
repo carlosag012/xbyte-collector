@@ -244,6 +244,21 @@ export function initDatabase(config: AppConfig): DB {
     // ignore if it already exists
   }
 
+  // Ensure a default ping profile exists (authoritative availability)
+  try {
+    const existingPing = db
+      .prepare(`SELECT id FROM poll_profiles WHERE kind = 'ping' ORDER BY id LIMIT 1`)
+      .get() as { id: number } | undefined;
+    if (!existingPing) {
+      db.prepare(
+        `INSERT INTO poll_profiles (kind, name, interval_sec, timeout_ms, retries, enabled, config_json, created_at, updated_at)
+         VALUES ('ping', 'Default Ping', 120, 1000, 1, 1, '{}', ?, ?)`
+      ).run(new Date().toISOString(), new Date().toISOString());
+    }
+  } catch {
+    // ignore if cannot insert; scheduler will proceed with existing profiles
+  }
+
   try {
     db.prepare(`ALTER TABLE poll_jobs ADD COLUMN result_json TEXT`).run();
   } catch {
