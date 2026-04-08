@@ -239,6 +239,12 @@ export function initDatabase(config: AppConfig): DB {
   }
 
   try {
+    db.prepare(`ALTER TABLE lldp_neighbors ADD COLUMN remote_port_id TEXT`).run();
+  } catch {
+    // ignore if it already exists
+  }
+
+  try {
     db.prepare(`ALTER TABLE poll_jobs ADD COLUMN result_json TEXT`).run();
   } catch {
     // ignore if already exists
