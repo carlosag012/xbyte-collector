@@ -48,6 +48,8 @@ function buildWorkerConfig(): WorkerConfig {
   };
 }
 
+const SNMP_TASK_TIMEOUT_MS = 60_000; // hard cap per SNMP job to avoid stuck running rows
+
 function log(data: Record<string, any>) {
   console.log(
     JSON.stringify({
@@ -194,132 +196,138 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
 
       const tasks = validDetails.map(({ job, detail }) => async () => {
         try {
-          const licExec = licenseAllowsCollection(db);
-          if (!licExec.allowed) {
-            finishPollJob(db, {
-              jobId: job.id,
-              status: "failed",
-              result: {
-                workerType: "snmp",
-                success: false,
-                blockedByLicense: true,
-                code: licExec.reason ?? "license_required",
-                effectiveStatus: licExec.effectiveStatus,
-                message: `Collection blocked: ${licExec.reason ?? "license_required"}`,
-                processedAt: new Date().toISOString(),
-                summary: { system: null, interfacesCount: 0, lldpNeighborsCount: 0 },
-                discovery: { system: null, interfaces: [], lldpNeighbors: [] },
-                context: {
+          await withTimeout(
+            (async () => {
+              const licExec = licenseAllowsCollection(db);
+              if (!licExec.allowed) {
+                finishPollJob(db, {
+                  jobId: job.id,
+                  status: "failed",
+                  result: {
+                    workerType: "snmp",
+                    success: false,
+                    blockedByLicense: true,
+                    code: licExec.reason ?? "license_required",
+                    effectiveStatus: licExec.effectiveStatus,
+                    message: `Collection blocked: ${licExec.reason ?? "license_required"}`,
+                    processedAt: new Date().toISOString(),
+                    summary: { system: null, interfacesCount: 0, lldpNeighborsCount: 0 },
+                    discovery: { system: null, interfaces: [], lldpNeighbors: [] },
+                    context: {
+                      jobId: detail.job.id,
+                      targetId: detail.target.id,
+                      deviceId: detail.device.id,
+                      deviceHostname: detail.device.hostname,
+                      deviceIpAddress: detail.device.ipAddress,
+                      profileId: detail.profile.id,
+                      profileKind: detail.profile.kind,
+                    },
+                  },
+                });
+                currentJobIds.delete(job.id);
+                failCount++;
+                log({
+                  level: "warn",
+                  msg: "snmp execution blocked by license",
+                  workerName: workerCfg.workerName,
                   jobId: detail.job.id,
-                  targetId: detail.target.id,
-                  deviceId: detail.device.id,
-                  deviceHostname: detail.device.hostname,
-                  deviceIpAddress: detail.device.ipAddress,
-                  profileId: detail.profile.id,
-                  profileKind: detail.profile.kind,
-                },
-              },
-            });
-            currentJobIds.delete(job.id);
-            failCount++;
-            log({
-              level: "warn",
-              msg: "snmp execution blocked by license",
-              workerName: workerCfg.workerName,
-              jobId: detail.job.id,
-              effectiveStatus: licExec.effectiveStatus,
-              reason: licExec.reason,
-            });
-            return;
-          }
+                  effectiveStatus: licExec.effectiveStatus,
+                  reason: licExec.reason,
+                });
+                return;
+              }
 
-          log({
-            level: "info",
-            msg: "snmp discovery start",
-            workerName: workerCfg.workerName,
-            jobId: detail.job.id,
-            targetId: detail.target.id,
-            deviceId: detail.device.id,
-            deviceHostname: detail.device.hostname,
-            deviceIpAddress: detail.device.ipAddress,
-          });
-
-          const res = await processSnmpJob(detail, workerCfg);
-          let status: "completed" | "failed" = res.success ? "completed" : "failed";
-          const processedAt = new Date().toISOString();
-
-          if (res.success) {
-            try {
-              persistDiscoveryNormalization(db, detail.device.id, res.discovery, processedAt);
-            } catch (err: any) {
-              status = "failed";
-              res.success = false;
-              res.error = err?.message ?? "snmp_persistence_failed";
-            }
-          }
-
-          finishPollJob(db, {
-            jobId: job.id,
-            status,
-            result: {
-              stub: false,
-              workerType: "snmp",
-              success: res.success,
-              target: detail.device.ipAddress,
-              processedAt,
-              summary: res.summary,
-              discovery: res.discovery,
-              error: res.error,
-              context: {
+              log({
+                level: "info",
+                msg: "snmp discovery start",
+                workerName: workerCfg.workerName,
                 jobId: detail.job.id,
                 targetId: detail.target.id,
                 deviceId: detail.device.id,
                 deviceHostname: detail.device.hostname,
                 deviceIpAddress: detail.device.ipAddress,
-                profileId: detail.profile.id,
-                profileKind: detail.profile.kind,
-              },
-            },
-          });
-          currentJobIds.delete(job.id);
-          if (res.success) successCount++;
-          else failCount++;
+              });
 
-          // emit snapshot
-          enqueueDeviceSnapshot({
-            deviceId: detail.device.id,
-            name: detail.device.hostname,
-            deviceType: detail.device.type ?? detail.device.kind ?? undefined,
-            status: res.success ? "up" : "down",
-            snmpProfileId: detail.profile?.id ? String(detail.profile.id) : null,
-            snmpPollerIds: detail.profile?.id ? [`poller-${detail.profile.id}`] : undefined,
-            successCount: res.success ? 1 : 0,
-            failureCount: res.success ? 0 : 1,
-            ts: processedAt,
-          });
-          enqueueDeviceState({
-            deviceId: detail.device.id,
-            status: res.success ? "up" : "down",
-            successCountDelta: res.success ? 1 : 0,
-            failureCountDelta: res.success ? 0 : 1,
-            ts: processedAt,
-            lastSuccessAt: res.success ? processedAt : undefined,
-            lastFailureAt: res.success ? undefined : processedAt,
-            lastPollAt: processedAt,
-            lastError: res.success ? null : res.error ?? null,
-          });
+              const res = await processSnmpJob(detail, workerCfg);
+              let status: "completed" | "failed" = res.success ? "completed" : "failed";
+              const processedAt = new Date().toISOString();
 
-          log({
-            level: res.success ? "info" : "warn",
-            msg: res.success ? "snmp discovery success" : "snmp discovery failed",
-            workerName: workerCfg.workerName,
-            jobId: detail.job.id,
-            deviceHostname: detail.device.hostname,
-            deviceIpAddress: detail.device.ipAddress,
-            interfacesCount: res.summary.interfacesCount,
-            lldpNeighborsCount: res.summary.lldpNeighborsCount,
-            error: res.error,
-          });
+              if (res.success) {
+                try {
+                  persistDiscoveryNormalization(db, detail.device.id, res.discovery, processedAt);
+                } catch (err: any) {
+                  status = "failed";
+                  res.success = false;
+                  res.error = err?.message ?? "snmp_persistence_failed";
+                }
+              }
+
+              finishPollJob(db, {
+                jobId: job.id,
+                status,
+                result: {
+                  stub: false,
+                  workerType: "snmp",
+                  success: res.success,
+                  target: detail.device.ipAddress,
+                  processedAt,
+                  summary: res.summary,
+                  discovery: res.discovery,
+                  error: res.error,
+                  context: {
+                    jobId: detail.job.id,
+                    targetId: detail.target.id,
+                    deviceId: detail.device.id,
+                    deviceHostname: detail.device.hostname,
+                    deviceIpAddress: detail.device.ipAddress,
+                    profileId: detail.profile.id,
+                    profileKind: detail.profile.kind,
+                  },
+                },
+              });
+              currentJobIds.delete(job.id);
+              if (res.success) successCount++;
+              else failCount++;
+
+              // emit snapshot
+              enqueueDeviceSnapshot({
+                deviceId: detail.device.id,
+                name: detail.device.hostname,
+                deviceType: detail.device.type ?? detail.device.kind ?? undefined,
+                status: res.success ? "up" : "down",
+                snmpProfileId: detail.profile?.id ? String(detail.profile.id) : null,
+                snmpPollerIds: detail.profile?.id ? [`poller-${detail.profile.id}`] : undefined,
+                successCount: res.success ? 1 : 0,
+                failureCount: res.success ? 0 : 1,
+                ts: processedAt,
+              });
+              enqueueDeviceState({
+                deviceId: detail.device.id,
+                status: res.success ? "up" : "down",
+                successCountDelta: res.success ? 1 : 0,
+                failureCountDelta: res.success ? 0 : 1,
+                ts: processedAt,
+                lastSuccessAt: res.success ? processedAt : undefined,
+                lastFailureAt: res.success ? undefined : processedAt,
+                lastPollAt: processedAt,
+                lastError: res.success ? null : res.error ?? null,
+              });
+
+              log({
+                level: res.success ? "info" : "warn",
+                msg: res.success ? "snmp discovery success" : "snmp discovery failed",
+                workerName: workerCfg.workerName,
+                jobId: detail.job.id,
+                deviceHostname: detail.device.hostname,
+                deviceIpAddress: detail.device.ipAddress,
+                interfacesCount: res.summary.interfacesCount,
+                lldpNeighborsCount: res.summary.lldpNeighborsCount,
+                error: res.error,
+              });
+            })(),
+            SNMP_TASK_TIMEOUT_MS,
+            "snmp_task_timeout"
+          );
         } catch (err: any) {
           currentJobIds.delete(job.id);
           finishPollJob(db, {
@@ -428,12 +436,30 @@ async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<{ s
   const timeoutMs = typeof detail.profile.timeoutMs === "number" ? detail.profile.timeoutMs : 2000;
 
   try {
+    // Core reachability: system fetch must succeed
     const system = await snmpGetSystem(workerCfg.snmpGetPath, target, profileConfig, timeoutMs);
-    const interfaces = await snmpWalkInterfaces(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
-    const lldpNeighbors = await snmpWalkLldp(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
+
+    // Extended discovery: best-effort so partial failures don't mark device down
+    const errors: string[] = [];
+    let interfaces: any[] = [];
+    let lldpNeighbors: any[] = [];
+
+    try {
+      interfaces = await snmpWalkInterfaces(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
+    } catch (err: any) {
+      errors.push(err?.message ?? "interfaces_walk_failed");
+      interfaces = [];
+    }
+
+    try {
+      lldpNeighbors = await snmpWalkLldp(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
+    } catch (err: any) {
+      errors.push(err?.message ?? "lldp_walk_failed");
+      lldpNeighbors = [];
+    }
 
     return {
-      success: true,
+      success: true, // core SNMP reached; treat device as up even if extended walks failed
       summary: {
         system,
         interfacesCount: interfaces.length,
@@ -444,6 +470,7 @@ async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<{ s
         interfaces,
         lldpNeighbors,
       },
+      error: errors.length ? errors.join("; ") : undefined,
     };
   } catch (err: any) {
     return {
@@ -695,6 +722,21 @@ function normalizePrivProtocol(proto: any): string | null {
   if (p === "AES256C") return "AES256C";
   if (p === "DES") return "DES";
   return null;
+}
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label = "timeout"): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(label)), ms);
+    promise
+      .then((v) => {
+        clearTimeout(timer);
+        resolve(v);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
 }
 
 async function runWithConcurrency(tasks: Array<() => Promise<void>>, limit: number, shuttingDown: { flag: boolean }) {
