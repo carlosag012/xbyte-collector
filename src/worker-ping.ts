@@ -367,15 +367,11 @@ async function runPingBatch(
     parseFpingOutput(stdout, result);
   } catch (err: any) {
     const stdout = err?.stdout as string | undefined;
-    if (stdout) {
-      parseFpingOutput(stdout, result);
+    const stderr = err?.stderr as string | undefined;
+    const combined = [stdout, stderr].filter(Boolean).join("\n");
+    if (combined) {
+      parseFpingOutput(combined, result);
     }
-    for (const t of targets) {
-      if (!result.has(t.ip)) {
-        result.set(t.ip, { success: false, latencyMs: null, error: err?.message ?? "fping_failed" });
-      }
-    }
-    return result;
   }
   for (const t of targets) {
     if (!result.has(t.ip)) {
