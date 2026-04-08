@@ -200,9 +200,27 @@ function startPollScheduler(db: DB) {
     try {
       if (!licenseAllowsCollection(db).allowed) return;
       const enabledTargets = listEnabledPollTargets(db);
-      const profiles = listPollProfiles(db);
-      const profileKind = new Map<number, string>();
-      profiles.forEach((p) => profileKind.set(p.id, p.kind));
+  const profiles = listPollProfiles(db);
+  const profileKind = new Map<number, string>();
+  profiles.forEach((p) => profileKind.set(p.id, p.kind));
+  // Ensure each enabled device has a ping target (authoritative availability)
+  const pingProfile = profiles.find((p) => p.kind === "ping");
+  if (pingProfile) {
+    const devices = listDevices(db).filter((d) => d.enabled);
+    const targets = listPollTargets(db);
+    const hasPingTarget = new Set(targets.filter((t) => profileKind.get(t.profileId) === "ping").map((t) => `${t.deviceId}:${t.profileId}`));
+    for (const d of devices) {
+      const key = `${d.id}:${pingProfile.id}`;
+      if (!hasPingTarget.has(key)) {
+        try {
+          createPollTarget(db, { deviceId: d.id, profileId: pingProfile.id, enabled: true });
+          logger.info("auto-added ping target", { deviceId: d.id, profileId: pingProfile.id });
+        } catch (err: any) {
+          logger.warn("failed to auto-add ping target", { deviceId: d.id, error: err?.message ?? String(err) });
+        }
+      }
+    }
+  }
       // Recover stale running jobs globally (lightweight)
       requeueStaleRunningPollJobs(db, STALE_RUNNING_SEC);
       // Latest ping result per device (authoritative availability)

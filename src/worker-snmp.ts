@@ -262,22 +262,22 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
                 }
               }
 
-              finishPollJob(db, {
-                jobId: job.id,
-                status,
-                result: {
-                  stub: false,
-                  workerType: "snmp",
-                  success: res.success,
-                  target: detail.device.ipAddress,
-                  processedAt,
-                  summary: res.summary,
-                  discovery: res.discovery,
-                  error: res.error,
-                  warnings: res.warnings,
-                  context: {
-                    jobId: detail.job.id,
-                    targetId: detail.target.id,
+          finishPollJob(db, {
+            jobId: job.id,
+            status,
+            result: {
+              stub: false,
+              workerType: "snmp",
+              success: res.success,
+              target: detail.device.ipAddress,
+              processedAt,
+              summary: res.summary,
+              discovery: res.discovery,
+              error: res.error,
+              warnings: res.warnings,
+              context: {
+                jobId: detail.job.id,
+                targetId: detail.target.id,
                     deviceId: detail.device.id,
                     deviceHostname: detail.device.hostname,
                     deviceIpAddress: detail.device.ipAddress,
@@ -302,17 +302,17 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
                 failureCount: res.success ? 0 : 1,
                 ts: processedAt,
               });
-              enqueueDeviceState({
-                deviceId: detail.device.id,
-                status: res.success ? "up" : "down",
-                successCountDelta: res.success ? 1 : 0,
-                failureCountDelta: res.success ? 0 : 1,
-                ts: processedAt,
-                lastSuccessAt: res.success ? processedAt : undefined,
-                lastFailureAt: res.success ? undefined : processedAt,
-                lastPollAt: processedAt,
-                lastError: res.success ? null : res.error ?? null,
-              });
+          enqueueDeviceState({
+            deviceId: detail.device.id,
+            status: res.success ? "up" : "unknown", // ping is authoritative; avoid flipping down on SNMP-only failures
+            successCountDelta: res.success ? 1 : 0,
+            failureCountDelta: res.success ? 0 : 1,
+            ts: processedAt,
+            lastSuccessAt: res.success ? processedAt : undefined,
+            lastFailureAt: res.success ? undefined : processedAt,
+            lastPollAt: processedAt,
+            lastError: res.success ? null : res.error ?? null,
+          });
 
               log({
                 level: res.success ? "info" : "warn",
