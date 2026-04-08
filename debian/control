@@ -7,7 +7,7 @@ Build-Depends: debhelper-compat (= 13), nodejs
 
 Package: xbyte-collector
 Architecture: amd64
-Depends: ${shlibs:Depends}, ${misc:Depends}, nodejs
+Depends: ${shlibs:Depends}, ${misc:Depends}, nodejs, fping
 Description: xbyte collector appliance (packaging scaffold)
  This is an early Debian packaging scaffold for the xbyte collector
  appliance. It sets up metadata only; final install mapping and

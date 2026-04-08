@@ -34,6 +34,7 @@ const EnvSchema = z
     XMON_API_KEY: z.string().optional(),
     XMON_HEARTBEAT_MS: z.coerce.number().int().positive().optional(),
     XMON_CONFIG_REFRESH_MS: z.coerce.number().int().positive().optional(),
+    APPLIANCE_HEARTBEAT_MS: z.coerce.number().int().positive().optional(),
   })
   .transform((v) => ({
     nodeEnv: v.NODE_ENV,
@@ -68,6 +69,7 @@ const EnvSchema = z
     xmonApiKey: v.XMON_API_KEY?.trim() || null,
     xmonHeartbeatMs: v.XMON_HEARTBEAT_MS ?? 15000,
     xmonConfigRefreshMs: v.XMON_CONFIG_REFRESH_MS ?? 60000,
+    applianceHeartbeatMs: v.APPLIANCE_HEARTBEAT_MS ?? v.XMON_HEARTBEAT_MS ?? 15000,
   }));
 
 export type AppConfig = z.infer<typeof EnvSchema>;
