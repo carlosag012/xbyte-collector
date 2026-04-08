@@ -361,7 +361,8 @@ async function runPingBatch(
 ): Promise<Map<string, { success: boolean; latencyMs: number | null; error?: string }>> {
   const result = new Map<string, { success: boolean; latencyMs: number | null; error?: string }>();
   if (!targets.length) return result;
-  const args = ["-a", "-C", "1", "-t", timeoutMs.toString(), ...targets.map((t) => t.ip)];
+  // Use -C (count) without -a so fping prints one line per host (including unreachable)
+  const args = ["-C", "1", "-t", timeoutMs.toString(), ...targets.map((t) => t.ip)];
   try {
     const { stdout } = await execFileAsync(fpingPath, args, { timeout: timeoutMs + 1000, encoding: "utf8" });
     parseFpingOutput(stdout, result);
