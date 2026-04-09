@@ -46,7 +46,7 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
   const configRefreshMs = Math.max(15000, cfg.xmonConfigRefreshMs ?? 60000);
   const backoff: BackoffState = { attempts: 0 };
   let stopped = false;
-  startTelemetryQueue(cfg);
+  startTelemetryQueue(() => cfg);
   let lastAuthState: { authorized?: boolean; collectionAllowed?: boolean } = {};
 
   // Send initial device snapshots once on start
