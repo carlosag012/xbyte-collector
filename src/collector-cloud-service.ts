@@ -4,7 +4,7 @@ import type { DB } from "./db.js";
 import { setLicenseState } from "./db.js";
 import { sendPing, fetchCollectorConfig, type CloudAuthState } from "./xmon-client.js";
 import { enqueueTelemetry, startTelemetryQueue } from "./telemetry-queue.js";
-import { getDevicePollHealth, listDevices, listPollProfiles, listPollTargets, updateCloudSyncState, upsertAppConfigEntries } from "./db.js";
+import { getAllAppConfig, getDevicePollHealth, listDevices, listPollProfiles, listPollTargets, updateCloudSyncState, upsertAppConfigEntries } from "./db.js";
 import { enqueueDeviceSnapshot, enqueueDeviceState, enqueueSnmpProfileSnapshot, enqueueSnmpPollerSnapshot } from "./telemetry-queue.js";
 
 type BackoffState = { attempts: number };
@@ -145,11 +145,21 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
     /* ignore */
   }
 
+  function resolveCloudCfg() {
+    const saved = getAllAppConfig(db);
+    return {
+      ...cfg,
+      xmonApiBase: saved["XMON_API_BASE"] || cfg.xmonApiBase,
+      xmonCollectorId: saved["XMON_COLLECTOR_ID"] || cfg.xmonCollectorId,
+      xmonApiKey: saved["XMON_API_KEY"] || cfg.xmonApiKey,
+    };
+  }
+
   async function heartbeatLoop() {
     while (!stopped) {
       let retryAfterSec: number | undefined;
       try {
-        const result = await sendPing(cfg);
+        const result = await sendPing(resolveCloudCfg());
         retryAfterSec = result.retryAfterSec;
         const { ok, state } = result;
         updateLicenseFromCloud(db, state);
@@ -186,7 +196,7 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
     while (!stopped) {
       let retryAfterSec: number | undefined;
       try {
-        const res = await fetchCollectorConfig(cfg);
+        const res = await fetchCollectorConfig(resolveCloudCfg());
         retryAfterSec = res.retryAfterSec;
         if (db) {
           // surface drift visibility: mark last fetch even if not applied
@@ -195,7 +205,7 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
             enabled: true,
             status: res.config ? "fetched_not_applied" : "fetched_empty",
             lastSyncAt: nowIso,
-            cloudEndpoint: cfg.xmonApiBase,
+            cloudEndpoint: resolveCloudCfg().xmonApiBase,
           });
           if (res.config) {
             upsertAppConfigEntries(db, {
