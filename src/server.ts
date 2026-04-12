@@ -110,7 +110,6 @@ import {
   updateUserPassword,
   type DB,
 } from "./db.js";
-import { getCloudEndpoint, getCloudHeaders } from "./util/cloud.js";
 import { hashPassword, verifyPassword } from "./passwords.js";
 import { authenticateLocalUser } from "./auth-service.js";
 import { issueSession, clearSession, readValidSession } from "./session-service.js";
