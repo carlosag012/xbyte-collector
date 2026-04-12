@@ -128,6 +128,87 @@ export function enqueueSnmpPollerSnapshot(item: {
   });
 }
 
+export function enqueueLldpNeighbors(item: {
+  deviceId: string;
+  neighbors: Array<{
+    localPort?: string | null;
+    remoteSysName?: string | null;
+    remotePortId?: string | null;
+    remotePortDesc?: string | null;
+    remoteChassisId?: string | null;
+    remoteMgmtIp?: string | null;
+  }>;
+  collectedAt?: string | Date;
+}) {
+  enqueueTelemetry({
+    messageId: `lldp-${item.deviceId}-${Date.now()}`,
+    kind: "event",
+    ts: item.collectedAt ? new Date(item.collectedAt).toISOString() : new Date().toISOString(),
+    payload: {
+      type: "lldp_neighbors",
+      deviceId: item.deviceId,
+      collectedAt: item.collectedAt ? new Date(item.collectedAt).toISOString() : undefined,
+      neighbors: item.neighbors,
+    },
+  });
+}
+
+export function enqueueInterfaceSnapshot(item: {
+  deviceId: string;
+  interfaces: Array<{
+    ifIndex?: number | null;
+    ifName?: string | null;
+    ifDescr?: string | null;
+    ifAlias?: string | null;
+    ifAdminStatus?: string | null;
+    ifOperStatus?: string | null;
+    ifSpeed?: number | null;
+    ifHighSpeed?: number | null;
+    mtu?: number | null;
+    mac?: string | null;
+    collectedAt?: string | null;
+  }>;
+  collectedAt?: string | Date;
+}) {
+  enqueueTelemetry({
+    messageId: `iface-${item.deviceId}-${Date.now()}`,
+    kind: "event",
+    ts: item.collectedAt ? new Date(item.collectedAt).toISOString() : new Date().toISOString(),
+    payload: {
+      type: "interface_snapshot",
+      deviceId: item.deviceId,
+      collectedAt: item.collectedAt ? new Date(item.collectedAt).toISOString() : undefined,
+      interfaces: item.interfaces,
+    },
+  });
+}
+
+export function enqueueSnmpSystemSnapshot(item: {
+  deviceId: string;
+  sysName?: string | null;
+  sysDescr?: string | null;
+  sysLocation?: string | null;
+  sysContact?: string | null;
+  sysUptime?: number | null;
+  collectedAt?: string | Date;
+}) {
+  enqueueTelemetry({
+    messageId: `sys-${item.deviceId}-${Date.now()}`,
+    kind: "event",
+    ts: item.collectedAt ? new Date(item.collectedAt).toISOString() : new Date().toISOString(),
+    payload: {
+      type: "snmp_system_snapshot",
+      deviceId: item.deviceId,
+      sysName: item.sysName,
+      sysDescr: item.sysDescr,
+      sysLocation: item.sysLocation,
+      sysContact: item.sysContact,
+      sysUptime: item.sysUptime,
+      collectedAt: item.collectedAt ? new Date(item.collectedAt).toISOString() : undefined,
+    },
+  });
+}
+
 export function startTelemetryQueue(resolveCfg: () => AppConfig) {
   setInterval(async () => {
     if (flushing) return;
@@ -137,9 +218,27 @@ export function startTelemetryQueue(resolveCfg: () => AppConfig) {
     try {
       const batch = queue.splice(0, MAX_BATCH);
       const cfg = resolveCfg();
+      if (!cfg.xmonApiBase || !cfg.xmonCollectorId || !cfg.xmonApiKey) {
+        console.error(
+          JSON.stringify({
+            level: "warn",
+            msg: "telemetry_send_skipped_missing_config",
+            missingApiBase: !cfg.xmonApiBase,
+            missingCollectorId: !cfg.xmonCollectorId,
+            missingApiKey: !cfg.xmonApiKey,
+            batchSize: batch.length,
+          }),
+        );
+        // requeue batch to try again later
+        queue.unshift(...batch);
+        flushing = false;
+        return;
+      }
+
       const res = await sendTelemetry(cfg, batch);
       if (!res.ok && res.retryAfterSec) {
         retryUntil = Date.now() + res.retryAfterSec * 1000;
+        console.error(JSON.stringify({ level: "warn", msg: "telemetry_rate_limited", retryAfterSec: res.retryAfterSec, batchSize: batch.length }));
       } else {
         retryUntil = null;
       }
@@ -147,7 +246,10 @@ export function startTelemetryQueue(resolveCfg: () => AppConfig) {
         // push back batch to retry once later; keep bounded
         queue.unshift(...batch);
         if (queue.length > MAX_QUEUE) queue.splice(0, queue.length - MAX_QUEUE);
+        console.error(JSON.stringify({ level: "warn", msg: "telemetry_send_failed", batchSize: batch.length, queued: queue.length }));
       }
+    } catch (err: any) {
+      console.error(JSON.stringify({ level: "error", msg: "telemetry_flush_exception", err: err?.message ?? String(err) }));
     } finally {
       flushing = false;
     }

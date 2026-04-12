@@ -21,7 +21,15 @@ import {
   getAllAppConfig,
   type DB,
 } from "./db.js";
-import { enqueueTelemetry, enqueueDeviceSnapshot, enqueueDeviceState, startTelemetryQueue } from "./telemetry-queue.js";
+import {
+  enqueueTelemetry,
+  enqueueDeviceSnapshot,
+  enqueueDeviceState,
+  enqueueInterfaceSnapshot,
+  enqueueSnmpSystemSnapshot,
+  enqueueLldpNeighbors,
+  startTelemetryQueue,
+} from "./telemetry-queue.js";
 
 type WorkerConfig = {
   workerName: string;
@@ -634,6 +642,7 @@ function parseLldp(outputs: Record<string, string>) {
     remoteSysName: "1.0.8802.1.1.2.1.4.1.1.9",
     remoteSysDesc: "1.0.8802.1.1.2.1.4.1.1.10",
     remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
+    localPort: "1.0.8802.1.1.2.1.3.7.1.3",
   };
 
   const remMap = new Map<string, any>();
@@ -657,6 +666,11 @@ function parseLldp(outputs: Record<string, string>) {
           val = null;
         }
       }
+      if (key === "localPort" && val !== null) {
+        // keep string as-is; tuple for localPort may be shorter, so use tuple of suffix without truncation if needed
+        const locSuffixParts = suffix.split(".");
+        tuple = locSuffixParts.slice(0, 3).join(".");
+      }
       const rec = sink.get(tuple) ?? {};
       if (val !== null) {
         rec[key] = val;
@@ -671,9 +685,10 @@ function parseLldp(outputs: Record<string, string>) {
 
   const neighbors: any[] = [];
   for (const [, rec] of remMap.entries()) {
+    if (!rec.localPort) continue; // required for ingest
     if (!rec.remoteSysName && !rec.remotePortId && !rec.remoteChassisId && !rec.remoteMgmtIp) continue;
     neighbors.push({
-      localPort: null,
+      localPort: rec.localPort ?? null,
       remoteSysName: rec.remoteSysName ?? null,
       remotePortId: rec.remotePortId ?? null,
       remoteChassisId: rec.remoteChassisId ?? null,
@@ -766,7 +781,92 @@ function persistDiscoveryNormalization(
     system: discovery.system ?? {},
     collectedAt,
   });
+  try {
+    const sys = discovery.system ?? {};
+    enqueueSnmpSystemSnapshot({
+      deviceId: String(deviceId),
+      sysName: sys.sysName ?? sys.sys_name ?? null,
+      sysDescr: sys.sysDescr ?? sys.sys_descr ?? null,
+      sysLocation: sys.sysLocation ?? sys.sys_location ?? null,
+      sysContact: sys.sysContact ?? sys.sys_contact ?? null,
+      sysUptime: typeof sys.sysUpTime === "number" ? sys.sysUpTime : sys.sysUpTime ? Number(sys.sysUpTime) : null,
+      collectedAt,
+    });
+  } catch (err) {
+    console.error(JSON.stringify({ level: "warn", msg: "system_enqueue_failed", deviceId, err: (err as any)?.message }));
+  }
   replaceInterfaceSnapshotsForDevice(db, deviceId, discovery.interfaces ?? [], collectedAt);
   replaceLldpNeighborsForDevice(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
   upsertDiscoveredDeviceCandidatesFromLldp(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
+  try {
+    const neighborsRaw = (discovery.lldpNeighbors ?? []).map((n: any) => ({
+      localPort: n?.localPort ?? n?.local_port ?? n?.localPortId ?? null,
+      remoteSysName: n?.remoteSysName ?? n?.remote_sys_name ?? null,
+      remotePortId: n?.remotePortId ?? n?.remote_port_id ?? null,
+      remotePortDesc: n?.remotePortDesc ?? n?.remote_port_desc ?? null,
+      remoteChassisId: n?.remoteChassisId ?? n?.remote_chassis_id ?? null,
+      remoteMgmtIp: n?.remoteMgmtIp ?? n?.remote_mgmt_ip ?? null,
+    }));
+    const neighbors = neighborsRaw.filter((n) => n.localPort && String(n.localPort).trim().length > 0);
+    const droppedNeighbors = neighborsRaw.length - neighbors.length;
+    if (droppedNeighbors > 0) {
+      console.error(
+        JSON.stringify({
+          level: "warn",
+          msg: "lldp_neighbors_dropped_missing_local_port",
+          deviceId,
+          dropped: droppedNeighbors,
+          total: neighborsRaw.length,
+        }),
+      );
+    }
+    if (neighbors.length) {
+      enqueueLldpNeighbors({
+        deviceId: String(deviceId),
+        neighbors,
+        collectedAt,
+      });
+    }
+  } catch (err) {
+    console.error(JSON.stringify({ level: "warn", msg: "lldp_enqueue_failed", deviceId, err: (err as any)?.message }));
+  }
+  try {
+    const ifacePayload = (discovery.interfaces ?? [])
+      .map((i: any) => ({
+        ifIndex: i?.ifIndex ?? i?.if_index,
+        ifName: i?.ifName ?? i?.if_name,
+        ifDescr: i?.ifDescr ?? i?.if_descr,
+        ifAlias: i?.ifAlias ?? i?.if_alias,
+        ifAdminStatus: i?.adminStatus ?? i?.ifAdminStatus ?? i?.admin_status,
+        ifOperStatus: i?.operStatus ?? i?.ifOperStatus ?? i?.oper_status,
+        ifSpeed: i?.speed ?? i?.ifSpeed,
+        ifHighSpeed: i?.ifHighSpeed,
+        mtu: i?.mtu,
+        mac: i?.mac,
+        collectedAt: collectedAt,
+      }))
+      .filter((i) => typeof i.ifIndex === "number" && Number.isFinite(i.ifIndex));
+    const droppedIfaces = (discovery.interfaces?.length ?? 0) - ifacePayload.length;
+    if (droppedIfaces > 0) {
+      console.error(
+        JSON.stringify({
+          level: "warn",
+          msg: "interface_enqueue_filtered_missing_ifIndex",
+          dropped: droppedIfaces,
+          total: discovery.interfaces?.length ?? 0,
+          deviceId,
+        }),
+      );
+    }
+    if (ifacePayload.length) {
+      enqueueInterfaceSnapshot({
+        deviceId: String(deviceId),
+        interfaces: ifacePayload,
+        collectedAt,
+      });
+    }
+  } catch (err) {
+    // non-fatal; ignore enqueue failure
+    console.error(JSON.stringify({ level: "warn", msg: "interface_enqueue_failed", deviceId, err: (err as any)?.message }));
+  }
 }
