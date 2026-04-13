@@ -946,7 +946,7 @@ function persistDiscoveryNormalization(
     console.error(JSON.stringify({ level: "warn", msg: "lldp_enqueue_failed", deviceId, err: (err as any)?.message }));
   }
   try {
-    const ifacePayload = (discovery.interfaces ?? [])
+    const ifacePayload = (derivedInterfaces ?? [])
       .map((i: any) => ({
         ifIndex: i?.ifIndex ?? i?.if_index,
         ifName: i?.ifName ?? i?.if_name,
