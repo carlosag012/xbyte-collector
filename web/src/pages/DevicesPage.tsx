@@ -244,20 +244,14 @@ export default function DevicesPage() {
                     <span>Hostname</span>
                     <input value={form.hostname} onChange={(e) => setForm({ ...form, hostname: e.target.value })} required />
                   </label>
-                  <label>
-                    <span>IP Address</span>
-                    <input value={form.ipAddress} onChange={(e) => setForm({ ...form, ipAddress: e.target.value })} required />
-                  </label>
                 </div>
                 <div className="form-col">
                   <label>
                     <span>Site</span>
                     <input value={form.site} onChange={(e) => setForm({ ...form, site: e.target.value })} />
                   </label>
-                  <label>
-                    <span>Org</span>
-                    <input value={form.org} onChange={(e) => setForm({ ...form, org: e.target.value })} />
-                  </label>
+                </div>
+                <div className="form-col">
                   <label>
                     <span>Type</span>
                     <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
@@ -283,6 +277,20 @@ export default function DevicesPage() {
                         </option>
                       ))}
                     </select>
+                  </label>
+                </div>
+              </div>
+              <div className="form-columns">
+                <div className="form-col">
+                  <label>
+                    <span>IP Address</span>
+                    <input value={form.ipAddress} onChange={(e) => setForm({ ...form, ipAddress: e.target.value })} required />
+                  </label>
+                </div>
+                <div className="form-col">
+                  <label>
+                    <span>Org</span>
+                    <input value={form.org} onChange={(e) => setForm({ ...form, org: e.target.value })} />
                   </label>
                 </div>
               </div>

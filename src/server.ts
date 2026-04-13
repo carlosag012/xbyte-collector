@@ -837,6 +837,7 @@ const server = createServer((req, res) => {
             enabled: body.enabled !== undefined ? Boolean(body.enabled) : undefined,
             site: body.site === undefined ? undefined : body.site,
             org: body.org === undefined ? undefined : body.org,
+            type: typeof body.type === "string" ? body.type : undefined,
           });
           if (!updated) {
             res.writeHead(404);
