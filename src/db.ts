@@ -139,6 +139,7 @@ export function initDatabase(config: AppConfig): DB {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       device_id INTEGER NOT NULL,
       if_index INTEGER,
+      if_type INTEGER,
       if_name TEXT,
       if_descr TEXT,
       if_alias TEXT,
@@ -271,6 +272,9 @@ export function initDatabase(config: AppConfig): DB {
 
   try {
     db.prepare(`ALTER TABLE interface_snapshots ADD COLUMN bps_in REAL`).run();
+  } catch {}
+  try {
+    db.prepare(`ALTER TABLE interface_snapshots ADD COLUMN if_type INTEGER`).run();
   } catch {}
   try {
     db.prepare(`ALTER TABLE interface_snapshots ADD COLUMN bps_out REAL`).run();
@@ -1343,6 +1347,7 @@ export function replaceInterfaceSnapshotsForDevice(
     utilOut?: number | null;
     utilAvg?: number | null;
     rateCollectedAt?: string | null;
+    ifType?: number | null;
   }>,
   collectedAt: string
 ) {
@@ -1350,13 +1355,14 @@ export function replaceInterfaceSnapshotsForDevice(
   const tx = db.transaction(() => {
     db.prepare(`DELETE FROM interface_snapshots WHERE device_id = ?`).run(deviceId);
     const stmt = db.prepare(
-      `INSERT INTO interface_snapshots (device_id, if_index, if_name, if_descr, if_alias, admin_status, oper_status, speed, mtu, mac, bps_in, bps_out, util_in, util_out, util_avg, rate_collected_at, collected_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO interface_snapshots (device_id, if_index, if_type, if_name, if_descr, if_alias, admin_status, oper_status, speed, mtu, mac, bps_in, bps_out, util_in, util_out, util_avg, rate_collected_at, collected_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const intf of interfaces) {
       stmt.run(
         deviceId,
         intf.ifIndex ?? null,
+        intf.ifType ?? null,
         intf.ifName ?? null,
         intf.ifDescr ?? null,
         intf.ifAlias ?? null,
@@ -1495,7 +1501,7 @@ export function getSystemSnapshotsForDevice(db: DB, deviceId: number) {
 export function listInterfaceSnapshotsForDevice(db: DB, deviceId: number) {
   return db
     .prepare(
-      `SELECT id, device_id as deviceId, if_index as ifIndex, if_name as ifName, if_descr as ifDescr, if_alias as ifAlias,
+      `SELECT id, device_id as deviceId, if_index as ifIndex, if_type as ifType, if_name as ifName, if_descr as ifDescr, if_alias as ifAlias,
               admin_status as adminStatus, oper_status as operStatus, speed, mtu, mac,
               bps_in as bpsIn, bps_out as bpsOut, util_in as utilIn, util_out as utilOut, util_avg as utilAvg,
               rate_collected_at as rateCollectedAt,

@@ -160,6 +160,7 @@ export function enqueueInterfaceSnapshot(item: {
     ifName?: string | null;
     ifDescr?: string | null;
     ifAlias?: string | null;
+    ifType?: number | null;
     ifAdminStatus?: string | null;
     ifOperStatus?: string | null;
     ifSpeed?: number | null;

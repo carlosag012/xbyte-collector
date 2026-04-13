@@ -519,6 +519,7 @@ async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileC
     "1.3.6.1.2.1.2.2.1.7",
     "1.3.6.1.2.1.2.2.1.8",
     "1.3.6.1.2.1.2.2.1.5",
+    "1.3.6.1.2.1.2.2.1.3",
     "1.3.6.1.2.1.31.1.1.1.15",
     "1.3.6.1.2.1.2.2.1.4",
     "1.3.6.1.2.1.2.2.1.6",
@@ -598,6 +599,7 @@ function parseInterfaces(stdout: string) {
     ifName: "1.3.6.1.2.1.31.1.1.1.1",
     ifDescr: "1.3.6.1.2.1.2.2.1.2",
     ifAlias: "1.3.6.1.2.1.31.1.1.1.18",
+    ifType: "1.3.6.1.2.1.2.2.1.3",
     adminStatus: "1.3.6.1.2.1.2.2.1.7",
     operStatus: "1.3.6.1.2.1.2.2.1.8",
     ifSpeed: "1.3.6.1.2.1.2.2.1.5",
@@ -624,6 +626,7 @@ function parseInterfaces(stdout: string) {
     if (key === "ifName") rec.ifName = val;
     else if (key === "ifDescr") rec.ifDescr = val;
     else if (key === "ifAlias") rec.ifAlias = val;
+    else if (key === "ifType") rec.ifType = Number(val) || null;
     else if (key === "adminStatus") rec.adminStatus = val;
     else if (key === "operStatus") rec.operStatus = val;
     else if (key === "ifSpeed") rec.ifSpeed = Number(val) || null;
@@ -641,6 +644,7 @@ function parseInterfaces(stdout: string) {
     ifName: rec.ifName ?? null,
     ifDescr: rec.ifDescr ?? null,
     ifAlias: rec.ifAlias ?? null,
+    ifType: rec.ifType ?? null,
     adminStatus: rec.adminStatus ?? null,
     operStatus: rec.operStatus ?? null,
     speed: rec.ifHighSpeed ?? rec.ifSpeed ?? null,
@@ -952,6 +956,7 @@ function persistDiscoveryNormalization(
         ifName: i?.ifName ?? i?.if_name,
         ifDescr: i?.ifDescr ?? i?.if_descr,
         ifAlias: i?.ifAlias ?? i?.if_alias,
+        ifType: i?.ifType ?? i?.if_type ?? null,
         ifAdminStatus: i?.adminStatus ?? i?.ifAdminStatus ?? i?.admin_status,
         ifOperStatus: i?.operStatus ?? i?.ifOperStatus ?? i?.oper_status,
         ifSpeed: i?.speed ?? i?.ifSpeed,
