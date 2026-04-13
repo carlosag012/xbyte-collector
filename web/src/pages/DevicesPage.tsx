@@ -19,6 +19,7 @@ type Device = {
   hostname: string;
   ipAddress: string;
   enabled: boolean;
+  type?: string | null;
   site?: string | null;
   org?: string | null;
   pollHealth?: DevicePollHealth;
@@ -52,7 +53,7 @@ export default function DevicesPage() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [search, setSearch] = useState("");
-  const [form, setForm] = useState({ hostname: "", ipAddress: "", site: "", org: "" });
+  const [form, setForm] = useState({ hostname: "", ipAddress: "", site: "", org: "", type: "" });
   const [editing, setEditing] = useState<Device | null>(null);
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
   const [interfaces, setInterfaces] = useState<InterfaceRow[]>([]);
@@ -118,6 +119,7 @@ export default function DevicesPage() {
       ipAddress: form.ipAddress,
       site: form.site || undefined,
       org: form.org || undefined,
+      type: form.type || undefined,
       enabled: true,
     };
     let url = "/api/devices";
@@ -134,14 +136,14 @@ export default function DevicesPage() {
     });
     if (res.ok) {
       await loadDevices();
-      setForm({ hostname: "", ipAddress: "", site: "", org: "" });
+      setForm({ hostname: "", ipAddress: "", site: "", org: "", type: "" });
       setEditing(null);
     }
   }
 
   function startEdit(d: Device) {
     setEditing(d);
-    setForm({ hostname: d.hostname, ipAddress: d.ipAddress, site: d.site ?? "", org: d.org ?? "" });
+    setForm({ hostname: d.hostname, ipAddress: d.ipAddress, site: d.site ?? "", org: d.org ?? "", type: d.type ?? "" });
   }
 
   async function toggleEnabled(d: Device) {
@@ -256,6 +258,32 @@ export default function DevicesPage() {
                     <span>Org</span>
                     <input value={form.org} onChange={(e) => setForm({ ...form, org: e.target.value })} />
                   </label>
+                  <label>
+                    <span>Type</span>
+                    <select value={form.type} onChange={(e) => setForm({ ...form, type: e.target.value })}>
+                      <option value="">Select type</option>
+                      {[
+                        "server",
+                        "workstation",
+                        "switch",
+                        "router",
+                        "firewall",
+                        "camera",
+                        "iot-device",
+                        "sensor",
+                        "ups",
+                        "printer",
+                        "access-point",
+                        "controller",
+                        "storage",
+                        "other",
+                      ].map((t) => (
+                        <option key={t} value={t}>
+                          {t}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
               </div>
               <div className="form-actions" style={{ display: "flex", gap: 8, flexDirection: "column", maxWidth: 420 }}>
@@ -326,6 +354,7 @@ export default function DevicesPage() {
             minWidth: 200,
           },
           { key: "site", header: "Site" },
+          { key: "type", header: "Type", render: (d: Device) => d.type || "—", minWidth: 120 },
           { key: "org", header: "Org" },
           {
             key: "ready",
