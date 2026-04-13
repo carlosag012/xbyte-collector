@@ -792,6 +792,7 @@ const server = createServer((req, res) => {
             enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
             site: typeof body.site === "string" ? body.site : undefined,
             org: typeof body.org === "string" ? body.org : undefined,
+            type: typeof body.type === "string" ? body.type : undefined,
           });
           logAdminAuditEvent(db, {
             entityType: "device",
@@ -1304,6 +1305,7 @@ const server = createServer((req, res) => {
             hostname: body.hostname,
             ipAddress: body.ipAddress,
             enabled: true,
+            type: typeof body.type === "string" ? body.type : undefined,
           });
           logAdminAuditEvent(db, {
             entityType: "device",
@@ -2114,6 +2116,7 @@ const server = createServer((req, res) => {
                   enabled: d.enabled !== undefined ? Boolean(d.enabled) : existing.enabled,
                   site: d.site ?? existing.site,
                   org: d.org ?? existing.org,
+                  type: typeof d.type === "string" ? d.type : existing.type ?? null,
                 });
               }
               deviceMap.set(d.ipAddress, existing.id);
@@ -2127,6 +2130,7 @@ const server = createServer((req, res) => {
                   enabled: d.enabled !== undefined ? Boolean(d.enabled) : true,
                   site: d.site ?? null,
                   org: d.org ?? null,
+                  type: typeof d.type === "string" ? d.type : undefined,
                 });
                 deviceMap.set(d.ipAddress, created.id);
                 deviceMap.set(d.hostname, created.id);

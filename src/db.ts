@@ -715,7 +715,7 @@ export function getDevicePollHealth(db: DB, deviceId: number): DevicePollHealth 
 export function getDeviceById(db: DB, id: number): DeviceRow | null {
   const row = db
     .prepare(
-      `SELECT id, hostname, ip_address as ipAddress, enabled, site, org, created_at as createdAt, updated_at as updatedAt
+      `SELECT id, hostname, ip_address as ipAddress, enabled, site, type, org, created_at as createdAt, updated_at as updatedAt
        FROM devices WHERE id = ? LIMIT 1`
     )
     .get(id) as
@@ -725,18 +725,19 @@ export function getDeviceById(db: DB, id: number): DeviceRow | null {
         ipAddress: string;
         enabled: number;
         site: string | null;
+        type: string | null;
         org: string | null;
         createdAt: string;
         updatedAt: string;
       }
     | undefined;
   if (!row) return null;
-  return { ...row, enabled: Boolean(row.enabled) };
+  return { ...row, enabled: Boolean(row.enabled), type: row.type ?? null };
 }
 
 export function updateDevice(
   db: DB,
-  input: { id: number; hostname?: string; ipAddress?: string; enabled?: boolean; site?: string | null; org?: string | null }
+  input: { id: number; hostname?: string; ipAddress?: string; enabled?: boolean; site?: string | null; org?: string | null; type?: string | null }
 ): DeviceRow | null {
   const existing = getDeviceById(db, input.id);
   if (!existing) return null;
@@ -747,12 +748,13 @@ export function updateDevice(
     enabled: input.enabled ?? existing.enabled,
     site: input.site === undefined ? existing.site : input.site,
     org: input.org === undefined ? existing.org : input.org,
+    type: input.type === undefined ? existing.type : input.type,
   };
   db.prepare(
     `UPDATE devices
-     SET hostname = ?, ip_address = ?, enabled = ?, site = ?, org = ?, updated_at = ?
+     SET hostname = ?, ip_address = ?, enabled = ?, site = ?, type = ?, org = ?, updated_at = ?
      WHERE id = ?`
-  ).run(next.hostname, next.ipAddress, next.enabled ? 1 : 0, next.site, next.org, now, input.id);
+  ).run(next.hostname, next.ipAddress, next.enabled ? 1 : 0, next.site, next.type ?? null, next.org, now, input.id);
   return getDeviceById(db, input.id);
 }
 
