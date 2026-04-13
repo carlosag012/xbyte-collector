@@ -247,6 +247,17 @@ export function startTelemetryQueue(resolveCfg: () => AppConfig) {
         queue.unshift(...batch);
         if (queue.length > MAX_QUEUE) queue.splice(0, queue.length - MAX_QUEUE);
         console.error(JSON.stringify({ level: "warn", msg: "telemetry_send_failed", batchSize: batch.length, queued: queue.length }));
+      } else if (res.ok) {
+        const firstPayload: any = batch[0]?.payload;
+        console.log(
+          JSON.stringify({
+            level: "info",
+            msg: "telemetry_send_ok",
+            batchSize: batch.length,
+            firstType: firstPayload?.type ?? null,
+            collectorIdPresent: !!cfg.xmonCollectorId,
+          }),
+        );
       }
     } catch (err: any) {
       console.error(JSON.stringify({ level: "error", msg: "telemetry_flush_exception", err: err?.message ?? String(err) }));

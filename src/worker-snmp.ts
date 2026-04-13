@@ -845,7 +845,8 @@ function persistDiscoveryNormalization(
         mac: i?.mac,
         collectedAt: collectedAt,
       }))
-      .filter((i) => typeof i.ifIndex === "number" && Number.isFinite(i.ifIndex));
+      .map((i) => ({ ...i, ifIndex: Number(i.ifIndex) }))
+      .filter((i) => Number.isFinite(i.ifIndex) && Number.isInteger(i.ifIndex));
     const droppedIfaces = (discovery.interfaces?.length ?? 0) - ifacePayload.length;
     if (droppedIfaces > 0) {
       console.error(
@@ -859,6 +860,16 @@ function persistDiscoveryNormalization(
       );
     }
     if (ifacePayload.length) {
+      console.log(
+        JSON.stringify({
+          level: "info",
+          msg: "interface_enqueue",
+          deviceId: String(deviceId),
+          discovered: discovery.interfaces?.length ?? 0,
+          enqueued: ifacePayload.length,
+          dropped: droppedIfaces,
+        }),
+      );
       enqueueInterfaceSnapshot({
         deviceId: String(deviceId),
         interfaces: ifacePayload,
