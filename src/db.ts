@@ -46,6 +46,7 @@ export function initDatabase(config: AppConfig): DB {
       ip_address TEXT NOT NULL,
       enabled INTEGER NOT NULL,
       site TEXT,
+      type TEXT,
       org TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -240,6 +241,12 @@ export function initDatabase(config: AppConfig): DB {
 
   try {
     db.prepare(`ALTER TABLE lldp_neighbors ADD COLUMN remote_port_id TEXT`).run();
+  } catch {
+    // ignore if it already exists
+  }
+
+  try {
+    db.prepare(`ALTER TABLE devices ADD COLUMN type TEXT`).run();
   } catch {
     // ignore if it already exists
   }
@@ -508,6 +515,7 @@ export type DeviceRow = {
   ipAddress: string;
   enabled: boolean;
   site: string | null;
+  type: string | null;
   org: string | null;
   createdAt: string;
   updatedAt: string;
@@ -528,7 +536,7 @@ export type DevicePollHealth = {
 export function listDevices(db: DB): DeviceRow[] {
   const rows = db
     .prepare(
-      `SELECT id, hostname, ip_address as ipAddress, enabled, site, org, created_at as createdAt, updated_at as updatedAt
+      `SELECT id, hostname, ip_address as ipAddress, enabled, site, type, org, created_at as createdAt, updated_at as updatedAt
        FROM devices ORDER BY id`
     )
     .all() as Array<{
@@ -537,6 +545,7 @@ export function listDevices(db: DB): DeviceRow[] {
     ipAddress: string;
     enabled: number;
     site: string | null;
+    type: string | null;
     org: string | null;
     createdAt: string;
     updatedAt: string;
@@ -547,7 +556,7 @@ export function listDevices(db: DB): DeviceRow[] {
 export function findDeviceByIpOrHostname(db: DB, input: { ipAddress?: string; hostname?: string }): DeviceRow | null {
   const row = db
     .prepare(
-      `SELECT id, hostname, ip_address as ipAddress, enabled, site, org, created_at as createdAt, updated_at as updatedAt
+      `SELECT id, hostname, ip_address as ipAddress, enabled, site, type, org, created_at as createdAt, updated_at as updatedAt
        FROM devices
        WHERE (${input.ipAddress ? "ip_address = ?" : "0"}) OR (${input.hostname ? "hostname = ?" : "0"})
        ORDER BY id LIMIT 1`
@@ -567,15 +576,16 @@ export function findDeviceByIpOrHostname(db: DB, input: { ipAddress?: string; ho
         ipAddress: string;
         enabled: number;
         site: string | null;
+        type: string | null;
         org: string | null;
         createdAt: string;
         updatedAt: string;
       }
     | undefined;
-  return row ? { ...row, enabled: Boolean(row.enabled) } : null;
+  return row ? { ...row, enabled: Boolean(row.enabled), type: row.type ?? null } : null;
 }
 
-export function createDevice(db: DB, input: { hostname: string; ipAddress: string; enabled?: boolean; site?: string; org?: string }): DeviceRow {
+export function createDevice(db: DB, input: { hostname: string; ipAddress: string; enabled?: boolean; site?: string; org?: string; type?: string }): DeviceRow {
   const now = new Date().toISOString();
   const enabled = input.enabled ?? true;
   const dup = db
@@ -587,16 +597,17 @@ export function createDevice(db: DB, input: { hostname: string; ipAddress: strin
   }
   const result = db
     .prepare(
-      `INSERT INTO devices (hostname, ip_address, enabled, site, org, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO devices (hostname, ip_address, enabled, site, type, org, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(input.hostname, input.ipAddress, enabled ? 1 : 0, input.site ?? null, input.org ?? null, now, now);
+    .run(input.hostname, input.ipAddress, enabled ? 1 : 0, input.site ?? null, input.type ?? null, input.org ?? null, now, now);
   return {
     id: Number(result.lastInsertRowid),
     hostname: input.hostname,
     ipAddress: input.ipAddress,
     enabled,
     site: input.site ?? null,
+    type: input.type ?? null,
     org: input.org ?? null,
     createdAt: now,
     updatedAt: now,
@@ -2332,7 +2343,7 @@ export function getPollJobDetail(
          pt.id as targetId, pt.device_id as targetDeviceId, pt.profile_id as targetProfileId, pt.enabled as targetEnabled,
          pt.created_at as targetCreatedAt, pt.updated_at as targetUpdatedAt,
          d.id as deviceId, d.hostname as deviceHostname, d.ip_address as deviceIpAddress, d.enabled as deviceEnabled,
-         d.site as deviceSite, d.org as deviceOrg, d.created_at as deviceCreatedAt, d.updated_at as deviceUpdatedAt,
+         d.site as deviceSite, d.type as deviceType, d.org as deviceOrg, d.created_at as deviceCreatedAt, d.updated_at as deviceUpdatedAt,
          pp.id as profileId, pp.kind as profileKind, pp.name as profileName, pp.interval_sec as profileIntervalSec,
          pp.timeout_ms as profileTimeoutMs, pp.retries as profileRetries, pp.enabled as profileEnabled,
          pp.config_json as profileConfigJson, pp.created_at as profileCreatedAt, pp.updated_at as profileUpdatedAt
@@ -2367,6 +2378,7 @@ export function getPollJobDetail(
         deviceIpAddress: string;
         deviceEnabled: number;
         deviceSite: string | null;
+        deviceType: string | null;
         deviceOrg: string | null;
         deviceCreatedAt: string;
         deviceUpdatedAt: string;
@@ -2414,6 +2426,7 @@ export function getPollJobDetail(
     ipAddress: row.deviceIpAddress,
     enabled: Boolean(row.deviceEnabled),
     site: row.deviceSite ?? null,
+    type: row.deviceType ?? null,
     org: row.deviceOrg ?? null,
     createdAt: row.deviceCreatedAt,
     updatedAt: row.deviceUpdatedAt,
