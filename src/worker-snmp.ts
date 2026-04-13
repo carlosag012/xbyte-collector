@@ -522,6 +522,10 @@ async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileC
     "1.3.6.1.2.1.31.1.1.1.15",
     "1.3.6.1.2.1.2.2.1.4",
     "1.3.6.1.2.1.2.2.1.6",
+    "1.3.6.1.2.1.31.1.1.1.6", // ifHCInOctets
+    "1.3.6.1.2.1.31.1.1.1.10", // ifHCOutOctets
+    "1.3.6.1.2.1.2.2.1.10", // ifInOctets (fallback)
+    "1.3.6.1.2.1.2.2.1.16", // ifOutOctets (fallback)
   ];
   const results: string[] = [];
   for (const oid of oidList) {
@@ -877,6 +881,34 @@ function persistDiscoveryNormalization(
     };
   });
   upsertLastInterfaceCounters(db, deviceId, nextCounters.filter((c) => Number.isFinite(c.ifIndex)));
+
+  // Temporary debug: log first few physical interfaces with counters/util
+  try {
+    const phys = derivedInterfaces
+      .filter((i: any) => typeof i.ifName === "string" && /^(gi|te|fo|eth)/i.test(i.ifName))
+      .slice(0, 5)
+      .map((i: any) => ({
+        ifIndex: i.ifIndex,
+        ifName: i.ifName,
+        hcIn: i.hcInOctets ?? i.ifHCInOctets ?? i.inOctets ?? i.ifInOctets ?? null,
+        hcOut: i.hcOutOctets ?? i.ifHCOutOctets ?? i.outOctets ?? i.ifOutOctets ?? null,
+        bpsIn: i.bpsIn ?? null,
+        bpsOut: i.bpsOut ?? null,
+        utilAvg: i.utilAvg ?? null,
+        rateCollectedAt: i.rateCollectedAt ?? null,
+      }));
+    if (phys.length) {
+      console.log(
+        JSON.stringify({
+          level: "info",
+          msg: "iface_util_debug",
+          deviceId,
+          sampleCount: phys.length,
+          sample: phys,
+        }),
+      );
+    }
+  } catch {}
 
   replaceInterfaceSnapshotsForDevice(db, deviceId, derivedInterfaces ?? [], collectedAt);
   replaceLldpNeighborsForDevice(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
