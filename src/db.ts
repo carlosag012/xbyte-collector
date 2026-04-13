@@ -147,8 +147,26 @@ export function initDatabase(config: AppConfig): DB {
       speed INTEGER,
       mtu INTEGER,
       mac TEXT,
+      bps_in REAL,
+      bps_out REAL,
+      util_in REAL,
+      util_out REAL,
+      util_avg REAL,
+      rate_collected_at TEXT,
       collected_at TEXT NOT NULL,
       created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS interface_counters_last (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER NOT NULL,
+      if_index INTEGER NOT NULL,
+      hc_in_octets INTEGER,
+      hc_out_octets INTEGER,
+      in_octets INTEGER,
+      out_octets INTEGER,
+      collected_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(device_id, if_index)
     );
     CREATE TABLE IF NOT EXISTS lldp_neighbors (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -250,6 +268,25 @@ export function initDatabase(config: AppConfig): DB {
   } catch {
     // ignore if it already exists
   }
+
+  try {
+    db.prepare(`ALTER TABLE interface_snapshots ADD COLUMN bps_in REAL`).run();
+  } catch {}
+  try {
+    db.prepare(`ALTER TABLE interface_snapshots ADD COLUMN bps_out REAL`).run();
+  } catch {}
+  try {
+    db.prepare(`ALTER TABLE interface_snapshots ADD COLUMN util_in REAL`).run();
+  } catch {}
+  try {
+    db.prepare(`ALTER TABLE interface_snapshots ADD COLUMN util_out REAL`).run();
+  } catch {}
+  try {
+    db.prepare(`ALTER TABLE interface_snapshots ADD COLUMN util_avg REAL`).run();
+  } catch {}
+  try {
+    db.prepare(`ALTER TABLE interface_snapshots ADD COLUMN rate_collected_at TEXT`).run();
+  } catch {}
 
   // Ensure a default ping profile exists (authoritative availability)
   try {
@@ -550,7 +587,7 @@ export function listDevices(db: DB): DeviceRow[] {
     createdAt: string;
     updatedAt: string;
   }>;
-  return rows.map((r) => ({ ...r, enabled: Boolean(r.enabled) }));
+  return rows.map((r) => ({ ...r, enabled: Boolean(r.enabled), type: r.type ?? null }));
 }
 
 export function findDeviceByIpOrHostname(db: DB, input: { ipAddress?: string; hostname?: string }): DeviceRow | null {
@@ -1300,6 +1337,12 @@ export function replaceInterfaceSnapshotsForDevice(
     speed?: number | null;
     mtu?: number | null;
     mac?: string | null;
+    bpsIn?: number | null;
+    bpsOut?: number | null;
+    utilIn?: number | null;
+    utilOut?: number | null;
+    utilAvg?: number | null;
+    rateCollectedAt?: string | null;
   }>,
   collectedAt: string
 ) {
@@ -1307,8 +1350,8 @@ export function replaceInterfaceSnapshotsForDevice(
   const tx = db.transaction(() => {
     db.prepare(`DELETE FROM interface_snapshots WHERE device_id = ?`).run(deviceId);
     const stmt = db.prepare(
-      `INSERT INTO interface_snapshots (device_id, if_index, if_name, if_descr, if_alias, admin_status, oper_status, speed, mtu, mac, collected_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO interface_snapshots (device_id, if_index, if_name, if_descr, if_alias, admin_status, oper_status, speed, mtu, mac, bps_in, bps_out, util_in, util_out, util_avg, rate_collected_at, collected_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const intf of interfaces) {
       stmt.run(
@@ -1322,6 +1365,12 @@ export function replaceInterfaceSnapshotsForDevice(
         intf.speed ?? null,
         intf.mtu ?? null,
         intf.mac ?? null,
+        intf.bpsIn ?? null,
+        intf.bpsOut ?? null,
+        intf.utilIn ?? null,
+        intf.utilOut ?? null,
+        intf.utilAvg ?? null,
+        intf.rateCollectedAt ?? null,
         collectedAt,
         now
       );
@@ -1448,12 +1497,68 @@ export function listInterfaceSnapshotsForDevice(db: DB, deviceId: number) {
     .prepare(
       `SELECT id, device_id as deviceId, if_index as ifIndex, if_name as ifName, if_descr as ifDescr, if_alias as ifAlias,
               admin_status as adminStatus, oper_status as operStatus, speed, mtu, mac,
+              bps_in as bpsIn, bps_out as bpsOut, util_in as utilIn, util_out as utilOut, util_avg as utilAvg,
+              rate_collected_at as rateCollectedAt,
               collected_at as collectedAt, created_at as createdAt
        FROM interface_snapshots
        WHERE device_id = ?
        ORDER BY if_index ASC, id ASC`
     )
     .all(deviceId) as any[];
+}
+
+export function getLastInterfaceCounters(db: DB, deviceId: number) {
+  return db
+    .prepare(
+      `SELECT if_index as ifIndex, hc_in_octets as hcIn, hc_out_octets as hcOut,
+              in_octets as inOctets, out_octets as outOctets, collected_at as collectedAt
+       FROM interface_counters_last
+       WHERE device_id = ?`
+    )
+    .all(deviceId) as Array<{
+      ifIndex: number;
+      hcIn: number | null;
+      hcOut: number | null;
+      inOctets: number | null;
+      outOctets: number | null;
+      collectedAt: string;
+    }>;
+}
+
+export function upsertLastInterfaceCounters(
+  db: DB,
+  deviceId: number,
+  items: Array<{
+    ifIndex: number;
+    hcIn?: number | null;
+    hcOut?: number | null;
+    inOctets?: number | null;
+    outOctets?: number | null;
+    collectedAt: string;
+  }>
+) {
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    const delStmt = db.prepare(`DELETE FROM interface_counters_last WHERE device_id = ? AND if_index = ?`);
+    const insStmt = db.prepare(
+      `INSERT INTO interface_counters_last (device_id, if_index, hc_in_octets, hc_out_octets, in_octets, out_octets, collected_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (const item of items) {
+      delStmt.run(deviceId, item.ifIndex);
+      insStmt.run(
+        deviceId,
+        item.ifIndex,
+        item.hcIn ?? null,
+        item.hcOut ?? null,
+        item.inOctets ?? null,
+        item.outOctets ?? null,
+        item.collectedAt,
+        now
+      );
+    }
+  });
+  tx();
 }
 
 export function listLldpNeighborsForDevice(db: DB, deviceId: number) {

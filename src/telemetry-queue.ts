@@ -166,6 +166,12 @@ export function enqueueInterfaceSnapshot(item: {
     ifHighSpeed?: number | null;
     mtu?: number | null;
     mac?: string | null;
+    bpsIn?: number | null;
+    bpsOut?: number | null;
+    utilIn?: number | null;
+    utilOut?: number | null;
+    utilAvg?: number | null;
+    rateCollectedAt?: string | null;
     collectedAt?: string | null;
   }>;
   collectedAt?: string | Date;

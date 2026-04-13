@@ -19,6 +19,8 @@ import {
   upsertDiscoveredDeviceCandidatesFromLldp,
   licenseAllowsCollection,
   getAllAppConfig,
+  getLastInterfaceCounters,
+  upsertLastInterfaceCounters,
   type DB,
 } from "./db.js";
 import {
@@ -598,6 +600,10 @@ function parseInterfaces(stdout: string) {
     ifHighSpeed: "1.3.6.1.2.1.31.1.1.1.15",
     ifMtu: "1.3.6.1.2.1.2.2.1.4",
     ifPhysAddress: "1.3.6.1.2.1.2.2.1.6",
+    ifHCInOctets: "1.3.6.1.2.1.31.1.1.1.6",
+    ifHCOutOctets: "1.3.6.1.2.1.31.1.1.1.10",
+    ifInOctets: "1.3.6.1.2.1.2.2.1.10",
+    ifOutOctets: "1.3.6.1.2.1.2.2.1.16",
   };
   for (const line of lines) {
     const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
@@ -620,6 +626,10 @@ function parseInterfaces(stdout: string) {
     else if (key === "ifHighSpeed") rec.ifHighSpeed = Number(val) || null;
     else if (key === "ifMtu") rec.ifMtu = Number(val) || null;
     else if (key === "ifPhysAddress") rec.ifPhysAddress = val;
+    else if (key === "ifHCInOctets") rec.ifHCInOctets = Number(val);
+    else if (key === "ifHCOutOctets") rec.ifHCOutOctets = Number(val);
+    else if (key === "ifInOctets") rec.ifInOctets = Number(val);
+    else if (key === "ifOutOctets") rec.ifOutOctets = Number(val);
     map.set(idx, rec);
   }
   return Array.from(map.entries()).map(([ifIndex, rec]) => ({
@@ -632,6 +642,10 @@ function parseInterfaces(stdout: string) {
     speed: rec.ifHighSpeed ?? rec.ifSpeed ?? null,
     mtu: rec.ifMtu ?? null,
     mac: rec.ifPhysAddress ?? null,
+    hcInOctets: rec.ifHCInOctets ?? null,
+    hcOutOctets: rec.ifHCOutOctets ?? null,
+    inOctets: rec.ifInOctets ?? null,
+    outOctets: rec.ifOutOctets ?? null,
   }));
 }
 
@@ -795,7 +809,76 @@ function persistDiscoveryNormalization(
   } catch (err) {
     console.error(JSON.stringify({ level: "warn", msg: "system_enqueue_failed", deviceId, err: (err as any)?.message }));
   }
-  replaceInterfaceSnapshotsForDevice(db, deviceId, discovery.interfaces ?? [], collectedAt);
+  // Derive utilization from counters locally; keep raw history local only
+  const prevCounters = getLastInterfaceCounters(db, deviceId);
+  const prevMap = new Map<number, { hcIn?: number | null; hcOut?: number | null; inOctets?: number | null; outOctets?: number | null; collectedAt: string }>();
+  for (const p of prevCounters) {
+    prevMap.set(p.ifIndex, {
+      hcIn: p.hcIn ?? undefined,
+      hcOut: p.hcOut ?? undefined,
+      inOctets: p.inOctets ?? undefined,
+      outOctets: p.outOctets ?? undefined,
+      collectedAt: p.collectedAt,
+    });
+  }
+  const collectedMs = new Date(collectedAt).getTime();
+  const nextCounters: Array<{ ifIndex: number; hcIn?: number | null; hcOut?: number | null; inOctets?: number | null; outOctets?: number | null; collectedAt: string }> = [];
+  const derivedInterfaces = (discovery.interfaces ?? []).map((intf: any) => {
+    const ifIndex = intf.ifIndex ?? intf.if_index;
+    const curr = {
+      hcIn: intf.hcInOctets ?? intf.ifHCInOctets ?? null,
+      hcOut: intf.hcOutOctets ?? intf.ifHCOutOctets ?? null,
+      inOctets: intf.inOctets ?? intf.ifInOctets ?? null,
+      outOctets: intf.outOctets ?? intf.ifOutOctets ?? null,
+    };
+    if (Number.isFinite(ifIndex)) {
+      nextCounters.push({ ifIndex: Number(ifIndex), hcIn: curr.hcIn, hcOut: curr.hcOut, inOctets: curr.inOctets, outOctets: curr.outOctets, collectedAt });
+    }
+    let bpsIn: number | null = null;
+    let bpsOut: number | null = null;
+    let utilIn: number | null = null;
+    let utilOut: number | null = null;
+    let utilAvg: number | null = null;
+    const prev = Number.isFinite(ifIndex) ? prevMap.get(Number(ifIndex)) : undefined;
+    const prevMs = prev ? new Date(prev.collectedAt).getTime() : null;
+    const deltaSec = prevMs && collectedMs > prevMs ? (collectedMs - prevMs) / 1000 : null;
+    const chooseCounter = (currVal?: number | null, prevVal?: number | null) =>
+      typeof currVal === "number" && typeof prevVal === "number" ? currVal - prevVal : null;
+    if (deltaSec && deltaSec > 0) {
+      const currIn = curr.hcIn ?? curr.inOctets;
+      const currOut = curr.hcOut ?? curr.outOctets;
+      const prevIn = prev?.hcIn ?? prev?.inOctets;
+      const prevOut = prev?.hcOut ?? prev?.outOctets;
+      const dIn = chooseCounter(currIn, prevIn);
+      const dOut = chooseCounter(currOut, prevOut);
+      if (dIn !== null && dIn >= 0) bpsIn = (dIn * 8) / deltaSec;
+      if (dOut !== null && dOut >= 0) bpsOut = (dOut * 8) / deltaSec;
+      const linkBps =
+        typeof intf.ifHighSpeed === "number" && intf.ifHighSpeed > 0
+          ? intf.ifHighSpeed * 1_000_000
+          : typeof intf.ifSpeed === "number" && intf.ifSpeed > 0
+          ? intf.ifSpeed
+          : null;
+      if (linkBps && linkBps > 0) {
+        if (bpsIn !== null) utilIn = (bpsIn / linkBps) * 100;
+        if (bpsOut !== null) utilOut = (bpsOut / linkBps) * 100;
+        const vals = [utilIn, utilOut].filter((v) => v !== null) as number[];
+        utilAvg = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+      }
+    }
+    return {
+      ...intf,
+      bpsIn: bpsIn ?? null,
+      bpsOut: bpsOut ?? null,
+      utilIn: utilIn ?? null,
+      utilOut: utilOut ?? null,
+      utilAvg: utilAvg ?? null,
+      rateCollectedAt: deltaSec ? collectedAt : null,
+    };
+  });
+  upsertLastInterfaceCounters(db, deviceId, nextCounters.filter((c) => Number.isFinite(c.ifIndex)));
+
+  replaceInterfaceSnapshotsForDevice(db, deviceId, derivedInterfaces ?? [], collectedAt);
   replaceLldpNeighborsForDevice(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
   upsertDiscoveredDeviceCandidatesFromLldp(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
   try {
@@ -843,6 +926,12 @@ function persistDiscoveryNormalization(
         ifHighSpeed: i?.ifHighSpeed,
         mtu: i?.mtu,
         mac: i?.mac,
+        bpsIn: i?.bpsIn ?? null,
+        bpsOut: i?.bpsOut ?? null,
+        utilIn: i?.utilIn ?? null,
+        utilOut: i?.utilOut ?? null,
+        utilAvg: i?.utilAvg ?? null,
+        rateCollectedAt: i?.rateCollectedAt ?? collectedAt,
         collectedAt: collectedAt,
       }))
       .map((i) => ({ ...i, ifIndex: Number(i.ifIndex) }))
