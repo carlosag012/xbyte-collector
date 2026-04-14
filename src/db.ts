@@ -572,6 +572,15 @@ export type DevicePollHealth = {
   lastError: string | null;
   activeSnmpProfile: string | null;
   activeSnmpPollerId: string | null;
+  hasSnmpBinding: boolean;
+  hasPingBinding: boolean;
+  lastSnmpPollAt: string | null;
+  lastSnmpSuccessAt: string | null;
+  lastSnmpFailureAt: string | null;
+  lastSnmpError: string | null;
+  lastPingSuccessAt: string | null;
+  lastPingFailureAt: string | null;
+  cloudSyncConfigured: boolean;
 };
 
 export function listDevices(db: DB): DeviceRow[] {
@@ -655,7 +664,11 @@ export function createDevice(db: DB, input: { hostname: string; ipAddress: strin
   };
 }
 
-export function getDevicePollHealth(db: DB, deviceId: number): DevicePollHealth {
+export function getDevicePollHealth(
+  db: DB,
+  deviceId: number,
+  cloudCfg?: { xmonApiBase?: string | null; xmonCollectorId?: string | null; xmonApiKey?: string | null }
+): DevicePollHealth {
   const latest = db
     .prepare(
       `SELECT pj.status, pj.finished_at as finishedAt, pj.started_at as startedAt, pj.scheduled_at as scheduledAt,
@@ -727,6 +740,86 @@ export function getDevicePollHealth(db: DB, deviceId: number): DevicePollHealth 
     )
     .get(deviceId) as { profileName: string | null; targetId: number | null; profileId: number | null } | undefined;
 
+  const hasSnmpBinding =
+    (db
+      .prepare(
+        `SELECT COUNT(*) as cnt
+         FROM poll_targets pt
+         JOIN poll_profiles pp ON pp.id = pt.profile_id
+         WHERE pt.device_id = ? AND pt.enabled = 1 AND pp.kind = 'snmp'`
+      )
+      .get(deviceId) as { cnt: number }).cnt > 0;
+
+  const hasPingBinding =
+    (db
+      .prepare(
+        `SELECT COUNT(*) as cnt
+         FROM poll_targets pt
+         JOIN poll_profiles pp ON pp.id = pt.profile_id
+         WHERE pt.device_id = ? AND pt.enabled = 1 AND pp.kind = 'ping'`
+      )
+      .get(deviceId) as { cnt: number }).cnt > 0;
+
+  const latestSnmp = db
+    .prepare(
+      `SELECT pj.status, pj.finished_at as finishedAt, pj.started_at as startedAt, pj.result_json as resultJson
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pt.id = pj.target_id
+       JOIN poll_profiles pp ON pp.id = pt.profile_id
+       WHERE pt.device_id = ? AND pp.kind = 'snmp'
+       ORDER BY pj.updated_at DESC
+       LIMIT 1`
+    )
+    .get(deviceId) as { status: string; finishedAt: string | null; startedAt: string | null; resultJson: string | null } | undefined;
+
+  const lastSnmpSuccess = db
+    .prepare(
+      `SELECT pj.finished_at as finishedAt
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pt.id = pj.target_id
+       JOIN poll_profiles pp ON pp.id = pt.profile_id
+       WHERE pt.device_id = ? AND pp.kind = 'snmp' AND pj.status = 'completed'
+       ORDER BY pj.finished_at DESC, pj.updated_at DESC
+       LIMIT 1`
+    )
+    .get(deviceId) as { finishedAt: string | null } | undefined;
+
+  const lastSnmpFailureRow = db
+    .prepare(
+      `SELECT pj.finished_at as finishedAt, pj.result_json as resultJson
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pt.id = pj.target_id
+       JOIN poll_profiles pp ON pp.id = pt.profile_id
+       WHERE pt.device_id = ? AND pp.kind = 'snmp' AND pj.status = 'failed'
+       ORDER BY pj.finished_at DESC, pj.updated_at DESC
+       LIMIT 1`
+    )
+    .get(deviceId) as { finishedAt: string | null; resultJson: string | null } | undefined;
+
+  const lastPingSuccess = db
+    .prepare(
+      `SELECT pj.finished_at as finishedAt
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pt.id = pj.target_id
+       JOIN poll_profiles pp ON pp.id = pt.profile_id
+       WHERE pt.device_id = ? AND pp.kind = 'ping' AND pj.status = 'completed'
+       ORDER BY pj.finished_at DESC, pj.updated_at DESC
+       LIMIT 1`
+    )
+    .get(deviceId) as { finishedAt: string | null } | undefined;
+
+  const lastPingFailure = db
+    .prepare(
+      `SELECT pj.finished_at as finishedAt
+       FROM poll_jobs pj
+       JOIN poll_targets pt ON pt.id = pj.target_id
+       JOIN poll_profiles pp ON pp.id = pt.profile_id
+       WHERE pt.device_id = ? AND pp.kind = 'ping' AND pj.status = 'failed'
+       ORDER BY pj.finished_at DESC, pj.updated_at DESC
+       LIMIT 1`
+    )
+    .get(deviceId) as { finishedAt: string | null } | undefined;
+
   const parseResult = (json: string | null) => {
     try {
       return json ? JSON.parse(json) : null;
@@ -739,6 +832,14 @@ export function getDevicePollHealth(db: DB, deviceId: number): DevicePollHealth 
   const lastErrorObj = parseResult(lastFailureRow?.resultJson ?? latest?.resultJson ?? null);
   const lastError =
     lastErrorObj?.error || lastErrorObj?.message || lastErrorObj?.summary || (typeof lastErrorObj === "string" ? lastErrorObj : null);
+  const lastSnmpErrorObj = parseResult(lastSnmpFailureRow?.resultJson ?? latestSnmp?.resultJson ?? null);
+  const lastSnmpError =
+    lastSnmpErrorObj?.error ||
+    lastSnmpErrorObj?.message ||
+    lastSnmpErrorObj?.summary ||
+    (typeof lastSnmpErrorObj === "string" ? lastSnmpErrorObj : null);
+
+  const cloudSyncConfigured = Boolean(cloudCfg?.xmonApiBase && cloudCfg?.xmonCollectorId && cloudCfg?.xmonApiKey);
 
   return {
     currentStatus: latest?.status ?? "idle",
@@ -750,6 +851,15 @@ export function getDevicePollHealth(db: DB, deviceId: number): DevicePollHealth 
     lastError: lastError ?? null,
     activeSnmpProfile: activeSnmp?.profileName ?? null,
     activeSnmpPollerId: activeSnmp?.profileId ? `poller-${activeSnmp.profileId}` : null,
+    hasSnmpBinding,
+    hasPingBinding,
+    lastSnmpPollAt: latestSnmp?.finishedAt ?? latestSnmp?.startedAt ?? null,
+    lastSnmpSuccessAt: lastSnmpSuccess?.finishedAt ?? null,
+    lastSnmpFailureAt: lastSnmpFailureRow?.finishedAt ?? null,
+    lastSnmpError: lastSnmpError ?? null,
+    lastPingSuccessAt: lastPingSuccess?.finishedAt ?? null,
+    lastPingFailureAt: lastPingFailure?.finishedAt ?? null,
+    cloudSyncConfigured,
   };
 }
 

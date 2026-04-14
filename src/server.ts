@@ -766,7 +766,15 @@ const server = createServer((req, res) => {
   if (method === "GET" && url === "/api/devices") {
     try {
       if (!db) throw new Error("db missing");
-      const devices = listDevices(db).map((d) => ({ ...d, pollHealth: getDevicePollHealth(db, d.id) }));
+      const cfg = getAllAppConfig(db);
+      const devices = listDevices(db).map((d) => ({
+        ...d,
+        pollHealth: getDevicePollHealth(db, d.id, {
+          xmonApiBase: cfg["XMON_API_BASE"] ?? cfg["XMON_API_BASE_URL"] ?? null,
+          xmonCollectorId: cfg["XMON_COLLECTOR_ID"] ?? null,
+          xmonApiKey: cfg["XMON_API_KEY"] ?? null,
+        }),
+      }));
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true, devices }));
     } catch {

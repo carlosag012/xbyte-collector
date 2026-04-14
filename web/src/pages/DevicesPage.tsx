@@ -12,6 +12,15 @@ type DevicePollHealth = {
   lastError: string | null;
   activeSnmpProfile: string | null;
   activeSnmpPollerId: string | null;
+  hasSnmpBinding: boolean;
+  hasPingBinding: boolean;
+  lastSnmpPollAt: string | null;
+  lastSnmpSuccessAt: string | null;
+  lastSnmpFailureAt: string | null;
+  lastSnmpError: string | null;
+  lastPingSuccessAt: string | null;
+  lastPingFailureAt: string | null;
+  cloudSyncConfigured: boolean;
 };
 
 type Device = {
@@ -387,12 +396,13 @@ export default function DevicesPage() {
             key: "ready",
             header: "Readiness",
             render: (d: Device) => {
-              const deviceTargets = targetsByDevice.get(d.id) ?? [];
-              const hasSnmp = deviceTargets.some((t) => profileKind.get(t.profileId) === "snmp" && t.enabled);
-              const hasPing = deviceTargets.some((t) => profileKind.get(t.profileId) === "ping" && t.enabled);
-              if (!hasSnmp) return <Pill status="needs target" label="No SNMP polling binding" />;
-              if (!hasPing) return <Pill status="needs target" label="No ping binding" />;
-              return <Pill status="ready" label="Polling assigned" />;
+              const h = d.pollHealth;
+              if (!h?.hasSnmpBinding) return <Pill status="needs target" label="No SNMP polling binding" />;
+              if (!h?.hasPingBinding) return <Pill status="needs target" label="No ping binding" />;
+              if (!h?.cloudSyncConfigured) return <Pill status="needs target" label="Cloud sync disabled" />;
+              if (h?.lastSnmpError && (!h.lastSnmpSuccessAt || (h.lastSnmpFailureAt && h.lastSnmpFailureAt >= (h.lastSnmpSuccessAt ?? ""))))
+                return <Pill status="warning" label="Last SNMP failed" />;
+              return <Pill status="ready" label="SNMP OK" />;
             },
           },
           {
@@ -457,9 +467,36 @@ export default function DevicesPage() {
                   {detailDevice.pollHealth?.activeSnmpPollerId ? ` (${detailDevice.pollHealth.activeSnmpPollerId})` : ""}
                 </div>
               </div>
+              <div>
+                <div className="muted">Last SNMP poll</div>
+                <div>{detailDevice.pollHealth?.lastSnmpPollAt ?? "—"}</div>
+              </div>
+              <div>
+                <div className="muted">Last SNMP success</div>
+                <div>{detailDevice.pollHealth?.lastSnmpSuccessAt ?? "—"}</div>
+              </div>
+              <div>
+                <div className="muted">Last SNMP failure</div>
+                <div>{detailDevice.pollHealth?.lastSnmpFailureAt ?? "—"}</div>
+              </div>
+              <div>
+                <div className="muted">Last ping success</div>
+                <div>{detailDevice.pollHealth?.lastPingSuccessAt ?? "—"}</div>
+              </div>
+              <div>
+                <div className="muted">Last ping failure</div>
+                <div>{detailDevice.pollHealth?.lastPingFailureAt ?? "—"}</div>
+              </div>
+              <div>
+                <div className="muted">Cloud sync</div>
+                <div>{detailDevice.pollHealth?.cloudSyncConfigured ? "Configured" : "Not configured"}</div>
+              </div>
               <div style={{ gridColumn: "1 / -1" }}>
                 <div className="muted">Last error</div>
                 <div style={{ color: "#f87171" }}>{detailDevice.pollHealth?.lastError ?? "—"}</div>
+                {detailDevice.pollHealth?.lastSnmpError && (
+                  <div style={{ color: "#f97316", marginTop: 4 }}>SNMP error: {detailDevice.pollHealth.lastSnmpError}</div>
+                )}
               </div>
             </div>
             <p style={{ margin: "8px 0 0 0" }}>

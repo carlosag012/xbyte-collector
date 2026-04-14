@@ -191,6 +191,9 @@ export default function TargetsPage() {
                 A polling binding connects a device to a poll profile. SNMP bindings are required for interface discovery. Enable it, then enqueue a poll to
                 validate credentials and reachability. You can keep multiple bindings per device to test different profiles.
               </p>
+              <p style={{ marginTop: 6, color: "var(--muted)" }}>
+                After enabling an SNMP binding, a poll should start within seconds. If nothing happens, check credentials and license/cloud config.
+              </p>
               <p style={{ marginTop: 6 }}>
                 If a poll fails, check Jobs and Logs for auth/timeout details. Adjust the profile or device IP, then retry enqueue to confirm recovery.
               </p>
