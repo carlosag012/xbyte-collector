@@ -2,7 +2,16 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, PageHeader, Pill, Table, useToast } from "../components/UI";
 import { Modal } from "../components/Modal";
 
-type Device = { id: number; hostname: string };
+type Device = {
+  id: number;
+  hostname: string;
+  pollHealth?: {
+    hasSnmpBinding?: boolean;
+    lastSnmpSuccessAt?: string | null;
+    lastSnmpFailureAt?: string | null;
+    lastSnmpError?: string | null;
+  };
+};
 type Profile = { id: number; name: string; kind: "ping" | "snmp" };
 type Target = { id: number; deviceId: number; profileId: number; enabled: boolean };
 
@@ -72,12 +81,29 @@ export default function TargetsPage() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ deviceId: form.deviceId, profileId: form.profileId, enabled: true }),
     });
+    const data = await res.json().catch(() => ({}));
     if (res.ok) {
       setForm({ deviceId: "", profileId: "" });
       await loadAll();
-      toast({ message: "Target created", tone: "success" });
+      if (data?.duplicate) {
+        toast({ message: data?.message || "Polling binding already exists for this device/profile.", tone: "warning" });
+        return;
+      }
+      if (data?.fastEnqueue?.attempted && data?.fastEnqueue?.ok) {
+        toast({ message: data?.fastEnqueue?.message || "Polling binding created and first SNMP poll queued.", tone: "success" });
+        return;
+      }
+      if (data?.fastEnqueue?.attempted && !data?.fastEnqueue?.ok) {
+        toast({
+          message:
+            data?.fastEnqueue?.message ||
+            "Polling binding created, but first SNMP poll could not be queued immediately. Scheduler will retry shortly.",
+          tone: "warning",
+        });
+        return;
+      }
+      toast({ message: "Polling binding created", tone: "success" });
     } else {
-      const data = await res.json().catch(() => ({}));
       toast({ message: data.message || data.error || "Create target failed", tone: "error" });
     }
   }
@@ -92,12 +118,23 @@ export default function TargetsPage() {
   }
 
   async function toggle(target: Target) {
-    await fetch("/api/poll-targets/update", {
+    const res = await fetch("/api/poll-targets/update", {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ id: target.id, enabled: !target.enabled }),
     });
+    const data = await res.json().catch(() => ({}));
+    if (res.ok && !target.enabled && data?.fastEnqueue?.attempted && data?.fastEnqueue?.ok) {
+      toast({ message: data?.fastEnqueue?.message || "Polling binding enabled and first SNMP poll queued.", tone: "success" });
+    } else if (res.ok && !target.enabled && data?.fastEnqueue?.attempted && !data?.fastEnqueue?.ok) {
+      toast({
+        message:
+          data?.fastEnqueue?.message ||
+          "Polling binding enabled, but first SNMP poll could not be queued immediately. Scheduler will retry shortly.",
+        tone: "warning",
+      });
+    }
     await loadAll();
   }
 
@@ -124,7 +161,7 @@ export default function TargetsPage() {
   return (
     <div>
       <PageHeader
-        title="Polling Bindings (Targets)"
+        title="Polling Bindings"
         subtitle="Link devices to polling profiles. SNMP bindings are required for interface discovery."
         action={
           <div style={{ display: "flex", gap: 8 }}>
@@ -180,7 +217,7 @@ export default function TargetsPage() {
                 </label>
                 <div className="form-actions" style={{ display: "flex", gap: 8, flexDirection: "column", maxWidth: 420 }}>
                   <button type="submit" className="btn-collector">
-                    <span className="btn-collector-label">Create Target</span>
+                    <span className="btn-collector-label">Create Polling Binding</span>
                   </button>
                 </div>
               </div>
@@ -192,10 +229,10 @@ export default function TargetsPage() {
                 validate credentials and reachability. You can keep multiple bindings per device to test different profiles.
               </p>
               <p style={{ marginTop: 6, color: "var(--muted)" }}>
-                After enabling an SNMP binding, a poll should start within seconds. If nothing happens, check credentials and license/cloud config.
+                Polling bindings were previously labeled targets. Enabling an SNMP polling binding should start polling within seconds.
               </p>
               <p style={{ marginTop: 6 }}>
-                If a poll fails, check Jobs and Logs for auth/timeout details. Adjust the profile or device IP, then retry enqueue to confirm recovery.
+                If polling does not start, check credentials, licensing, and cloud config. If a poll fails, check Jobs and Logs for auth/timeout details.
               </p>
             </div>
           </div>
@@ -238,9 +275,22 @@ export default function TargetsPage() {
               </div>
             ),
           },
+          {
+            key: "device-snmp",
+            header: "Device SNMP",
+            render: (t: Target) => {
+              const profile = profiles.find((p) => p.id === t.profileId);
+              if (!profile || profile.kind !== "snmp") return "—";
+              const device = devices.find((d) => d.id === t.deviceId);
+              const h = device?.pollHealth;
+              if (h?.lastSnmpSuccessAt) return `Last success: ${h.lastSnmpSuccessAt}`;
+              if (h?.lastSnmpError) return `Last failure: ${h.lastSnmpError}`;
+              return h?.hasSnmpBinding ? "Waiting for first SNMP success" : "No SNMP binding";
+            },
+          },
         ]}
         data={filtered}
-        empty="No targets yet"
+        empty="No polling bindings yet"
       />
 
       {historyFor && (

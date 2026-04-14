@@ -91,7 +91,7 @@ export default function DashboardPage({ status, config, licensing, onRefresh }: 
           <ul style={{ margin: 0, paddingLeft: 18, color: "var(--muted)" }}>
             <li><a href="/devices" style={{ color: "var(--accent)" }}>Devices</a>: add managed hosts</li>
             <li><a href="/profiles" style={{ color: "var(--accent)" }}>Profiles</a>: configure ping/SNMP</li>
-            <li><a href="/targets" style={{ color: "var(--accent)" }}>Targets</a>: attach profiles to devices</li>
+            <li><a href="/targets" style={{ color: "var(--accent)" }}>Polling Bindings</a>: attach profiles to devices</li>
             <li><a href="/jobs" style={{ color: "var(--accent)" }}>Jobs</a>: review poll activity</li>
             <li><a href="/backups" style={{ color: "var(--accent)" }}>Recovery</a>: export/restore safely</li>
             <li><a href="/licensing" style={{ color: "var(--accent)" }}>Licensing</a>: verify entitlement</li>

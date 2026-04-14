@@ -152,7 +152,7 @@ export default function App() {
           { label: "Dashboard", to: "/dashboard" },
           { label: "Devices", to: "/devices" },
           { label: "Profiles", to: "/profiles" },
-          { label: "Targets", to: "/targets" },
+          { label: "Polling Bindings", to: "/targets" },
           { label: "Jobs", to: "/jobs" },
           { label: "Neighbors", to: "/neighbors" },
         ],

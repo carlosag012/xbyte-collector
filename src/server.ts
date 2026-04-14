@@ -2446,17 +2446,45 @@ const server = createServer((req, res) => {
             res.end(JSON.stringify({ ok: false, error: "profile_not_found" }));
             return;
           }
+          const existing = findPollTargetByDeviceProfile(db, Number(body.deviceId), Number(body.profileId));
+          if (existing) {
+            res.writeHead(200);
+            res.end(
+              JSON.stringify({
+                ok: true,
+                target: existing,
+                duplicate: true,
+                message: "Polling binding already exists for this device and profile.",
+              })
+            );
+            return;
+          }
           const target = createPollTarget(db, {
             deviceId: Number(body.deviceId),
             profileId: Number(body.profileId),
             enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
           });
+          let fastEnqueue:
+            | { attempted: true; ok: boolean; jobId?: number; message?: string }
+            | { attempted: false; ok: false } = { attempted: false, ok: false };
           if (target.enabled && profile.kind === "snmp") {
+            fastEnqueue = { attempted: true, ok: false };
             try {
               const job = enqueuePollJobForTarget(db, target.id);
               logger.info("fast_enqueue_snmp_on_create", { targetId: target.id, jobId: job?.id });
+              fastEnqueue = {
+                attempted: true,
+                ok: true,
+                jobId: job?.id,
+                message: "Polling binding created and first SNMP poll queued.",
+              };
             } catch (err: any) {
               logger.warn("fast_enqueue_failed_on_create", { targetId: target.id, error: err?.message });
+              fastEnqueue = {
+                attempted: true,
+                ok: false,
+                message: err?.message ?? "Polling binding created, but first SNMP poll could not be queued immediately.",
+              };
             }
           }
           logAdminAuditEvent(db, {
@@ -2467,7 +2495,7 @@ const server = createServer((req, res) => {
             after: target,
           });
           res.writeHead(200);
-          res.end(JSON.stringify({ ok: true, target }));
+          res.end(JSON.stringify({ ok: true, target, fastEnqueue }));
         } catch {
           res.writeHead(500);
           res.end(JSON.stringify({ ok: false, error: "db_error" }));
@@ -2500,14 +2528,29 @@ const server = createServer((req, res) => {
             res.end(JSON.stringify({ ok: false, error: "target_not_found" }));
             return;
           }
+          let fastEnqueue:
+            | { attempted: true; ok: boolean; jobId?: number; message?: string }
+            | { attempted: false; ok: false } = { attempted: false, ok: false };
           if (prev && !prev.enabled && updated.enabled) {
             const profile = getPollProfileById(db, updated.profileId);
             if (profile && profile.kind === "snmp") {
+              fastEnqueue = { attempted: true, ok: false };
               try {
                 const job = enqueuePollJobForTarget(db, updated.id);
                 logger.info("fast_enqueue_snmp_on_enable", { targetId: updated.id, jobId: job?.id });
+                fastEnqueue = {
+                  attempted: true,
+                  ok: true,
+                  jobId: job?.id,
+                  message: "Polling binding enabled and first SNMP poll queued.",
+                };
               } catch (err: any) {
                 logger.warn("fast_enqueue_failed_on_enable", { targetId: updated.id, error: err?.message });
+                fastEnqueue = {
+                  attempted: true,
+                  ok: false,
+                  message: err?.message ?? "Polling binding enabled, but first SNMP poll could not be queued immediately.",
+                };
               }
             }
           }
@@ -2519,7 +2562,7 @@ const server = createServer((req, res) => {
             after: updated,
           });
           res.writeHead(200);
-          res.end(JSON.stringify({ ok: true, target: updated }));
+          res.end(JSON.stringify({ ok: true, target: updated, fastEnqueue }));
         } catch {
           res.writeHead(500);
           res.end(JSON.stringify({ ok: false, error: "db_error" }));
