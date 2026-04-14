@@ -4,11 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=xbyte
-Group=xbyte
-WorkingDirectory=/usr/lib/xbyte-collector
-EnvironmentFile=/etc/xbyte-collector/xbyte-collector.env
-ExecStart=/usr/bin/node /usr/lib/xbyte-collector/dist/src/server.js
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__ENV_FILE__
+ExecStart=/usr/bin/node __APP_DIR__/dist/src/server.js
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=65536

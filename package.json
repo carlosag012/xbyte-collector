@@ -12,7 +12,9 @@
     "worker:ping": "tsx src/worker-ping.ts",
     "worker:snmp": "tsx src/worker-snmp.ts",
     "workers:start": "node dist/src/workers-supervisor.js",
-    "workers:start:dev": "tsx src/workers-supervisor.ts"
+    "workers:start:dev": "tsx src/workers-supervisor.ts",
+    "install:service": "sudo bash deploy/install-service.sh",
+    "install:service:no-restart": "sudo RESTART=0 bash deploy/install-service.sh"
   },
   "dependencies": {
     "better-sqlite3": "^9.4.5",

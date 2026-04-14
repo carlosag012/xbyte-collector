@@ -841,6 +841,19 @@ export function getDevicePollHealth(
 
   const cloudSyncConfigured = Boolean(cloudCfg?.xmonApiBase && cloudCfg?.xmonCollectorId && cloudCfg?.xmonApiKey);
 
+  const toMs = (ts: string | null | undefined) => {
+    if (!ts) return null;
+    const ms = Date.parse(ts);
+    return Number.isFinite(ms) ? ms : null;
+  };
+  const lastSuccessMs = toMs(lastSuccess?.finishedAt ?? null);
+  const lastFailureMs = toMs(lastFailureRow?.finishedAt ?? null);
+  const lastSnmpSuccessMs = toMs(lastSnmpSuccess?.finishedAt ?? null);
+  const lastSnmpFailureMs = toMs(lastSnmpFailureRow?.finishedAt ?? null);
+  const activeLastError = lastSuccessMs !== null && lastFailureMs !== null && lastSuccessMs > lastFailureMs ? null : lastError;
+  const activeLastSnmpError =
+    lastSnmpSuccessMs !== null && lastSnmpFailureMs !== null && lastSnmpSuccessMs > lastSnmpFailureMs ? null : lastSnmpError;
+
   return {
     currentStatus: latest?.status ?? "idle",
     lastPollAt,
@@ -848,7 +861,7 @@ export function getDevicePollHealth(
     lastFailureAt: lastFailureRow?.finishedAt ?? null,
     successCount: counts?.successCount ?? 0,
     failureCount: counts?.failureCount ?? 0,
-    lastError: lastError ?? null,
+    lastError: activeLastError ?? null,
     activeSnmpProfile: activeSnmp?.profileName ?? null,
     activeSnmpPollerId: activeSnmp?.profileId ? `poller-${activeSnmp.profileId}` : null,
     hasSnmpBinding,
@@ -856,7 +869,7 @@ export function getDevicePollHealth(
     lastSnmpPollAt: latestSnmp?.finishedAt ?? latestSnmp?.startedAt ?? null,
     lastSnmpSuccessAt: lastSnmpSuccess?.finishedAt ?? null,
     lastSnmpFailureAt: lastSnmpFailureRow?.finishedAt ?? null,
-    lastSnmpError: lastSnmpError ?? null,
+    lastSnmpError: activeLastSnmpError ?? null,
     lastPingSuccessAt: lastPingSuccess?.finishedAt ?? null,
     lastPingFailureAt: lastPingFailure?.finishedAt ?? null,
     cloudSyncConfigured,
