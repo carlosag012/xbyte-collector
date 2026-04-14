@@ -67,6 +67,21 @@ export default function DevicesPage() {
   const [historyModal, setHistoryModal] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  const targetsByDevice = useMemo(() => {
+    const map = new Map<number, Target[]>();
+    targets.forEach((t) => {
+      if (!map.has(t.deviceId)) map.set(t.deviceId, []);
+      map.get(t.deviceId)!.push(t);
+    });
+    return map;
+  }, [targets]);
+
+  const profileKind = useMemo(() => {
+    const m = new Map<number, "ping" | "snmp">();
+    profiles.forEach((p) => m.set(p.id, p.kind));
+    return m;
+  }, [profiles]);
+
   useEffect(() => {
     load();
   }, []);
@@ -315,6 +330,10 @@ export default function DevicesPage() {
               <p style={{ marginTop: 6 }}>
                 After saving, attach a profile on the Targets page and enqueue a poll (or use Jobs → Manual enqueue) to verify connectivity before rollout.
               </p>
+              <p style={{ marginTop: 6, color: "var(--muted)" }}>
+                Minimum for interfaces: SNMP profile + enabled polling binding (target) + cloud sync configured. Without an SNMP binding, interfaces will not
+                leave the collector.
+              </p>
             </div>
           </div>
         </Card>
@@ -368,9 +387,12 @@ export default function DevicesPage() {
             key: "ready",
             header: "Readiness",
             render: (d: Device) => {
-              const targetCount = targets.filter((t) => t.deviceId === d.id).length;
-              const status = targetCount > 0 ? "ready" : "needs target";
-              return <Pill status={status} />;
+              const deviceTargets = targetsByDevice.get(d.id) ?? [];
+              const hasSnmp = deviceTargets.some((t) => profileKind.get(t.profileId) === "snmp" && t.enabled);
+              const hasPing = deviceTargets.some((t) => profileKind.get(t.profileId) === "ping" && t.enabled);
+              if (!hasSnmp) return <Pill status="needs target" label="No SNMP polling binding" />;
+              if (!hasPing) return <Pill status="needs target" label="No ping binding" />;
+              return <Pill status="ready" label="Polling assigned" />;
             },
           },
           {
@@ -444,6 +466,11 @@ export default function DevicesPage() {
               Readiness: <Pill status={detailTargets.length > 0 ? "ready" : promotionNote ? "needs target" : "needs profile"} />{" "}
               {detailTargets.length === 0 ? "Attach a profile/target to begin polling." : "Targets attached; enqueue a poll to collect."}
             </p>
+            {detailTargets.filter((t) => profileKind.get(t.profileId) === "snmp" && t.enabled).length === 0 && (
+              <p style={{ margin: "4px 0 0 0", color: "#b45309" }}>
+                No enabled SNMP polling binding. Create/enable one to collect interfaces and system data.
+              </p>
+            )}
           </Card>
           {history.length > 0 && (
             <Card title="History">

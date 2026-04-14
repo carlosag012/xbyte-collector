@@ -124,8 +124,8 @@ export default function TargetsPage() {
   return (
     <div>
       <PageHeader
-        title="Poll Targets"
-        subtitle="Link devices to profiles, then enqueue first polls."
+        title="Polling Bindings (Targets)"
+        subtitle="Link devices to polling profiles. SNMP bindings are required for interface discovery."
         action={
           <div style={{ display: "flex", gap: 8 }}>
             <select value={deviceFilter ?? ""} onChange={(e) => setDeviceFilter(e.target.value ? Number(e.target.value) : null)}>
@@ -149,7 +149,7 @@ export default function TargetsPage() {
       />
 
       <div className="cards cards-full" style={{ marginBottom: 16 }}>
-        <Card title="Create Target">
+        <Card title="Create Polling Binding">
           <div className="form-row">
             <form onSubmit={createTarget} className="form-panel">
               <div className="form-fields form-fields-single">
@@ -186,10 +186,10 @@ export default function TargetsPage() {
               </div>
             </form>
             <div className="about-panel">
-              <strong>About targets</strong>
+              <strong>About polling bindings</strong>
               <p style={{ marginTop: 6 }}>
-                Targets connect a device to a poll profile. Enable a target when you are ready to collect, then enqueue a poll to validate credentials and
-                reachability. You can keep multiple targets per device to test different profiles.
+                A polling binding connects a device to a poll profile. SNMP bindings are required for interface discovery. Enable it, then enqueue a poll to
+                validate credentials and reachability. You can keep multiple bindings per device to test different profiles.
               </p>
               <p style={{ marginTop: 6 }}>
                 If a poll fails, check Jobs and Logs for auth/timeout details. Adjust the profile or device IP, then retry enqueue to confirm recovery.
