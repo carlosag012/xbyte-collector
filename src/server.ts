@@ -35,6 +35,7 @@ import {
   createPollTarget,
   updatePollTarget,
   getPollTargetById,
+  getPollProfileById,
   listPollJobs,
   claimNextPendingPollJob,
   getPollJobById,
@@ -2443,6 +2444,14 @@ const server = createServer((req, res) => {
             profileId: Number(body.profileId),
             enabled: body.enabled !== undefined ? Boolean(body.enabled) : true,
           });
+          if (target.enabled && profile.kind === "snmp") {
+            try {
+              const job = enqueuePollJobForTarget(db, target.id);
+              logger.info("fast_enqueue_snmp_on_create", { targetId: target.id, jobId: job?.id });
+            } catch (err: any) {
+              logger.warn("fast_enqueue_failed_on_create", { targetId: target.id, error: err?.message });
+            }
+          }
           logAdminAuditEvent(db, {
             entityType: "target",
             entityId: target.id,
@@ -2474,6 +2483,7 @@ const server = createServer((req, res) => {
         }
         try {
           if (!db) throw new Error("db missing");
+          const prev = getPollTargetById(db, Number(body.id));
           const updated = updatePollTarget(db, {
             id: Number(body.id),
             enabled: body.enabled !== undefined ? Boolean(body.enabled) : undefined,
@@ -2482,6 +2492,17 @@ const server = createServer((req, res) => {
             res.writeHead(404);
             res.end(JSON.stringify({ ok: false, error: "target_not_found" }));
             return;
+          }
+          if (prev && !prev.enabled && updated.enabled) {
+            const profile = getPollProfileById(db, updated.profileId);
+            if (profile && profile.kind === "snmp") {
+              try {
+                const job = enqueuePollJobForTarget(db, updated.id);
+                logger.info("fast_enqueue_snmp_on_enable", { targetId: updated.id, jobId: job?.id });
+              } catch (err: any) {
+                logger.warn("fast_enqueue_failed_on_enable", { targetId: updated.id, error: err?.message });
+              }
+            }
           }
           logAdminAuditEvent(db, {
             entityType: "target",

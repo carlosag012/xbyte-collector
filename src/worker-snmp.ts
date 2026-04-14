@@ -31,6 +31,7 @@ import {
   enqueueSnmpSystemSnapshot,
   enqueueLldpNeighbors,
   startTelemetryQueue,
+  flushTelemetryNow,
 } from "./telemetry-queue.js";
 
 type WorkerConfig = {
@@ -1005,5 +1006,11 @@ function persistDiscoveryNormalization(
   } catch (err) {
     // non-fatal; ignore enqueue failure
     console.error(JSON.stringify({ level: "warn", msg: "interface_enqueue_failed", deviceId, err: (err as any)?.message }));
+  }
+
+  try {
+    await flushTelemetryNow();
+  } catch {
+    // ignore fast flush errors; periodic flush will handle
   }
 }

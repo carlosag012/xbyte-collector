@@ -16,6 +16,8 @@ const MAX_BATCH = 25;
 const FLUSH_MS = 4000;
 const MAX_QUEUE = 200;
 
+let resolvingCfg: (() => AppConfig) | null = null;
+
 export function enqueueTelemetry(item: TelemetryItem) {
   if (queue.length >= MAX_QUEUE) queue.shift();
   queue.push(item);
@@ -217,6 +219,7 @@ export function enqueueSnmpSystemSnapshot(item: {
 }
 
 export function startTelemetryQueue(resolveCfg: () => AppConfig) {
+  resolvingCfg = resolveCfg;
   setInterval(async () => {
     if (flushing) return;
     if (retryUntil && Date.now() < retryUntil) return;
@@ -272,4 +275,58 @@ export function startTelemetryQueue(resolveCfg: () => AppConfig) {
       flushing = false;
     }
   }, FLUSH_MS);
+}
+
+// Manual flush for fast-path after first discovery
+export async function flushTelemetryNow() {
+  if (flushing) return;
+  if (!resolvingCfg) return;
+  if (retryUntil && Date.now() < retryUntil) return;
+  if (!queue.length) return;
+  flushing = true;
+  try {
+    const batch = queue.splice(0, MAX_BATCH);
+    const cfg = resolvingCfg();
+    if (!cfg.xmonApiBase || !cfg.xmonCollectorId || !cfg.xmonApiKey) {
+      console.error(
+        JSON.stringify({
+          level: "warn",
+          msg: "telemetry_send_skipped_missing_config",
+          missingApiBase: !cfg.xmonApiBase,
+          missingCollectorId: !cfg.xmonCollectorId,
+          missingApiKey: !cfg.xmonApiKey,
+          batchSize: batch.length,
+          fastPath: true,
+        }),
+      );
+      queue.unshift(...batch);
+      flushing = false;
+      return;
+    }
+    const res = await sendTelemetry(cfg, batch);
+    if (!res.ok && res.retryAfterSec) {
+      retryUntil = Date.now() + res.retryAfterSec * 1000;
+      queue.unshift(...batch);
+      console.error(JSON.stringify({ level: "warn", msg: "telemetry_rate_limited_fast", retryAfterSec: res.retryAfterSec, batchSize: batch.length }));
+    } else if (!res.ok) {
+      queue.unshift(...batch);
+      if (queue.length > MAX_QUEUE) queue.splice(0, queue.length - MAX_QUEUE);
+      console.error(JSON.stringify({ level: "warn", msg: "telemetry_send_failed_fast", batchSize: batch.length, queued: queue.length }));
+    } else {
+      const firstPayload: any = batch[0]?.payload;
+      console.log(
+        JSON.stringify({
+          level: "info",
+          msg: "telemetry_send_ok_fast",
+          batchSize: batch.length,
+          firstType: firstPayload?.type ?? null,
+          collectorIdPresent: !!cfg.xmonCollectorId,
+        }),
+      );
+    }
+  } catch (err: any) {
+    console.error(JSON.stringify({ level: "error", msg: "telemetry_flush_exception_fast", err: err?.message ?? String(err) }));
+  } finally {
+    flushing = false;
+  }
 }
