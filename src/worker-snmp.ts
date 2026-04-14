@@ -1009,7 +1009,7 @@ function persistDiscoveryNormalization(
   }
 
   try {
-    await flushTelemetryNow();
+    void flushTelemetryNow().catch(() => {});
   } catch {
     // ignore fast flush errors; periodic flush will handle
   }

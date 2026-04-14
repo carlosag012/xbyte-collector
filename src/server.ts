@@ -35,7 +35,6 @@ import {
   createPollTarget,
   updatePollTarget,
   getPollTargetById,
-  getPollProfileById,
   listPollJobs,
   claimNextPendingPollJob,
   getPollJobById,
