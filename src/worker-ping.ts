@@ -257,6 +257,7 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
         enqueueDeviceSnapshot({
           deviceId: detail.device.id,
           name: detail.device.hostname,
+          ip: detail.device.ipAddress,
           deviceType: detail.device.type ?? detail.device.kind ?? undefined,
           status: success ? "up" : "down",
           snmpProfileId: detail.device.snmpProfileId ?? null,

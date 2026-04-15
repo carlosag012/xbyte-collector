@@ -305,6 +305,7 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
               enqueueDeviceSnapshot({
                 deviceId: detail.device.id,
                 name: detail.device.hostname,
+                ip: detail.device.ipAddress,
                 deviceType: detail.device.type ?? detail.device.kind ?? undefined,
                 status: res.success ? "up" : "down",
                 snmpProfileId: detail.profile?.id ? String(detail.profile.id) : null,
@@ -793,6 +794,19 @@ async function runWithConcurrency(tasks: Array<() => Promise<void>>, limit: numb
   await Promise.all(workers);
 }
 
+function parseSysUptimeValue(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const direct = Number(trimmed);
+  if (Number.isFinite(direct)) return direct;
+  const firstNumber = trimmed.match(/^\(?\s*(\d+)/);
+  if (!firstNumber) return null;
+  const parsed = Number(firstNumber[1]);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function persistDiscoveryNormalization(
   db: DB,
   deviceId: number,
@@ -812,7 +826,7 @@ function persistDiscoveryNormalization(
       sysDescr: sys.sysDescr ?? sys.sys_descr ?? null,
       sysLocation: sys.sysLocation ?? sys.sys_location ?? null,
       sysContact: sys.sysContact ?? sys.sys_contact ?? null,
-      sysUptime: typeof sys.sysUpTime === "number" ? sys.sysUpTime : sys.sysUpTime ? Number(sys.sysUpTime) : null,
+      sysUptime: parseSysUptimeValue(sys.sysUpTime ?? sys.sys_uptime),
       collectedAt,
     });
   } catch (err) {

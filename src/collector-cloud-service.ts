@@ -75,6 +75,7 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
       enqueueDeviceSnapshot({
         deviceId: String(d.id),
         name: d.hostname,
+        ip: d.ipAddress,
         deviceType: d.type ?? undefined,
         status: d.enabled ? "unknown" : "down",
         snmpProfileId: snmpProfileId !== undefined ? String(snmpProfileId) : null,

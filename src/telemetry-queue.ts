@@ -26,6 +26,7 @@ export function enqueueTelemetry(item: TelemetryItem) {
 export function enqueueDeviceSnapshot(item: {
   deviceId: string;
   name?: string;
+  ip?: string;
   deviceType?: string;
   status?: "up" | "down" | "unknown";
   snmpProfileId?: string | null;
@@ -42,6 +43,7 @@ export function enqueueDeviceSnapshot(item: {
       type: "device_snapshot",
       deviceId: item.deviceId,
       name: item.name,
+      ip: item.ip,
       deviceType: item.deviceType,
       status: item.status,
       snmpProfileId: item.snmpProfileId ?? null,
