@@ -64,6 +64,8 @@ import {
   claimPollJobById,
   createPollJob,
   getDeviceById,
+  getAvailabilityHistorySummary,
+  getAvailabilityChart,
   getPollProfileById,
   getPollJobDetail,
   enqueuePollJobForTarget,
@@ -1705,6 +1707,72 @@ const server = createServer((req, res) => {
         res.writeHead(400);
         res.end(JSON.stringify({ ok: false, error: "invalid_json" }));
       });
+    return;
+  }
+
+  if (method === "GET" && url.startsWith("/api/xmon/devices/")) {
+    const parsedUrl = new URL(req.url ?? "/", "http://localhost");
+    const matchHistory = parsedUrl.pathname.match(/^\/api\/xmon\/devices\/(\d+)\/history-summary$/);
+    const matchAvailability = parsedUrl.pathname.match(/^\/api\/xmon\/devices\/(\d+)\/availability$/);
+
+    if (!matchHistory && !matchAvailability) {
+      res.writeHead(404);
+      res.end(JSON.stringify({ ok: false, error: "not_found" }));
+      return;
+    }
+
+    const rawDeviceId = Number.parseInt((matchHistory?.[1] ?? matchAvailability?.[1]) as string, 10);
+    if (!Number.isInteger(rawDeviceId) || rawDeviceId <= 0) {
+      res.writeHead(400);
+      res.end(JSON.stringify({ ok: false, error: "invalid_device_id" }));
+      return;
+    }
+
+    try {
+      if (!db) throw new Error("db missing");
+      const device = getDeviceById(db, rawDeviceId);
+      if (!device) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ ok: false, error: "not_found" }));
+        return;
+      }
+
+      if (matchHistory) {
+        const summary = getAvailabilityHistorySummary(db, rawDeviceId);
+        if (!summary) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ ok: false, error: "not_found" }));
+          return;
+        }
+        res.writeHead(200);
+        res.end(JSON.stringify(summary));
+        return;
+      }
+
+      const range = parsedUrl.searchParams.get("range");
+      const resolution = parsedUrl.searchParams.get("resolution");
+      const validPair =
+        (range === "24h" && resolution === "5m") ||
+        (range === "7d" && resolution === "1h") ||
+        (range === "30d" && resolution === "1d");
+      if (!validPair || !range || !resolution) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_range_or_resolution" }));
+        return;
+      }
+
+      const chart = getAvailabilityChart(db, rawDeviceId, range, resolution);
+      if (!chart) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ ok: false, error: "not_found" }));
+        return;
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify(chart));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
     return;
   }
 

@@ -97,6 +97,42 @@ export function initDatabase(config: AppConfig): DB {
       updated_at TEXT NOT NULL,
       FOREIGN KEY(target_id) REFERENCES poll_targets(id)
     );
+    CREATE TABLE IF NOT EXISTS availability_state_current (
+      device_id INTEGER PRIMARY KEY,
+      current_state TEXT NOT NULL,
+      current_down_since TEXT,
+      last_state_change_at TEXT,
+      last_poll_at TEXT,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(device_id) REFERENCES devices(id)
+    );
+    CREATE TABLE IF NOT EXISTS availability_transitions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER NOT NULL,
+      ts TEXT NOT NULL,
+      from_state TEXT,
+      to_state TEXT NOT NULL,
+      latency_ms REAL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(device_id) REFERENCES devices(id)
+    );
+    CREATE TABLE IF NOT EXISTS availability_daily_rollups (
+      device_id INTEGER NOT NULL,
+      day TEXT NOT NULL,
+      up_ms REAL NOT NULL DEFAULT 0,
+      down_ms REAL NOT NULL DEFAULT 0,
+      observed_ms REAL NOT NULL DEFAULT 0,
+      incident_count INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(device_id, day),
+      FOREIGN KEY(device_id) REFERENCES devices(id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_availability_transitions_device_ts
+      ON availability_transitions(device_id, ts);
+    CREATE INDEX IF NOT EXISTS idx_availability_transitions_ts
+      ON availability_transitions(ts);
+    CREATE INDEX IF NOT EXISTS idx_availability_daily_rollups_device_day
+      ON availability_daily_rollups(device_id, day);
     CREATE TABLE IF NOT EXISTS companies (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       company_name TEXT NOT NULL,
@@ -179,6 +215,33 @@ export function initDatabase(config: AppConfig): DB {
       remote_mgmt_ip TEXT,
       collected_at TEXT NOT NULL,
       created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS availability_state_current (
+      device_id INTEGER PRIMARY KEY,
+      current_state TEXT NOT NULL,
+      current_down_since TEXT,
+      last_state_change_at TEXT,
+      last_poll_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS availability_transitions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER NOT NULL,
+      ts TEXT NOT NULL,
+      from_state TEXT NOT NULL,
+      to_state TEXT NOT NULL,
+      latency_ms REAL,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS availability_daily_rollups (
+      device_id INTEGER NOT NULL,
+      day TEXT NOT NULL,
+      up_ms REAL NOT NULL DEFAULT 0,
+      down_ms REAL NOT NULL DEFAULT 0,
+      observed_ms REAL NOT NULL DEFAULT 0,
+      incident_count INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(device_id, day)
     );
     CREATE TABLE IF NOT EXISTS neighbor_reviews (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -312,6 +375,16 @@ export function initDatabase(config: AppConfig): DB {
   } catch {
     // ignore if already exists
   }
+
+  try {
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_availability_state_current_updated_at ON availability_state_current(updated_at)`).run();
+  } catch {}
+  try {
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_availability_transitions_device_ts ON availability_transitions(device_id, ts)`).run();
+  } catch {}
+  try {
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_availability_daily_rollups_device_day ON availability_daily_rollups(device_id, day)`).run();
+  } catch {}
 
   const row = db
     .prepare(`SELECT id FROM bootstrap_state WHERE id = 1`)
@@ -581,6 +654,95 @@ export type DevicePollHealth = {
   lastPingSuccessAt: string | null;
   lastPingFailureAt: string | null;
   cloudSyncConfigured: boolean;
+};
+
+type AvailabilityStateValue = "up" | "down" | "unknown";
+
+type AvailabilityStateCurrentRow = {
+  deviceId: number;
+  currentState: AvailabilityStateValue;
+  currentDownSince: string | null;
+  lastStateChangeAt: string | null;
+  lastPollAt: string | null;
+  updatedAt: string;
+};
+
+type AvailabilityTransitionRow = {
+  id: number;
+  deviceId: number;
+  ts: string;
+  fromState: AvailabilityStateValue;
+  toState: AvailabilityStateValue;
+  latencyMs: number | null;
+  createdAt: string;
+};
+
+type AvailabilityHistoryEvent = AvailabilityTransitionRow & { tsMs: number };
+
+type AvailabilityDailyRollupRow = {
+  deviceId: number;
+  day: string;
+  upMs: number;
+  downMs: number;
+  observedMs: number;
+  incidentCount: number;
+  updatedAt: string;
+};
+
+type AvailabilityHistoryContext = {
+  current: AvailabilityStateCurrentRow | null;
+  baseState: AvailabilityStateValue;
+  events: AvailabilityHistoryEvent[];
+  nowMs: number;
+  nowIso: string;
+};
+
+type AvailabilitySegment = {
+  startMs: number;
+  endMs: number;
+  state: AvailabilityStateValue;
+};
+
+type AvailabilityWindowStats = {
+  overallPct: number | null;
+  downtimeSeconds: number | null;
+  incidentCount: number | null;
+};
+
+type AvailabilityTotals = {
+  upMs: number;
+  downMs: number;
+  incidentCount: number;
+};
+
+type AvailabilitySummaryResponse = {
+  deviceId: string;
+  collectorId: null;
+  availabilitySummary: {
+    last1hPct: number | null;
+    last24hPct: number | null;
+    last7dPct: number | null;
+    last30dPct: number | null;
+    currentDownSince: string | null;
+    lastStateChangeAt: string | null;
+    previewPoints: Array<{ ts: string; value: number }>;
+    previewRange: "24h";
+    previewResolution: "5m";
+    previewFreshAt: string;
+  };
+  sla: null;
+  updatedAt: string;
+};
+
+type AvailabilityChartResponse = {
+  deviceId: string;
+  range: "24h" | "7d" | "30d";
+  resolution: "5m" | "1h" | "1d";
+  source: "collector";
+  cached: false;
+  generatedAt: string;
+  points: Array<{ ts: string; upPct: number; state?: string }>;
+  summary: AvailabilityWindowStats;
 };
 
 export function listDevices(db: DB): DeviceRow[] {
@@ -920,6 +1082,678 @@ export function updateDevice(
      WHERE id = ?`
   ).run(next.hostname, next.ipAddress, next.enabled ? 1 : 0, next.site, next.type ?? null, next.org, now, input.id);
   return getDeviceById(db, input.id);
+}
+
+const AVAILABILITY_RAW_WINDOW_MS = 24 * 60 * 60 * 1000;
+const AVAILABILITY_SUMMARY_WINDOWS = {
+  "1h": 60 * 60 * 1000,
+  "24h": 24 * 60 * 60 * 1000,
+  "7d": 7 * 24 * 60 * 60 * 1000,
+  "30d": 30 * 24 * 60 * 60 * 1000,
+} as const;
+const AVAILABILITY_BUCKETS = {
+  "5m": 5 * 60 * 1000,
+  "1h": 60 * 60 * 1000,
+  "1d": 24 * 60 * 60 * 1000,
+} as const;
+
+function parseAvailabilityTsMs(ts: string | null | undefined) {
+  if (!ts) return null;
+  const ms = Date.parse(ts);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function roundAvailabilityPct(value: number) {
+  return Math.round(value * 10) / 10;
+}
+
+function createAvailabilityTotals(): AvailabilityTotals {
+  return { upMs: 0, downMs: 0, incidentCount: 0 };
+}
+
+function addAvailabilityTotals(target: AvailabilityTotals, source: AvailabilityTotals) {
+  target.upMs += source.upMs;
+  target.downMs += source.downMs;
+  target.incidentCount += source.incidentCount;
+}
+
+function normalizeAvailabilityState(value: string | null | undefined): AvailabilityStateValue {
+  const lower = String(value ?? "").trim().toLowerCase();
+  if (lower === "up" || lower === "down" || lower === "unknown") return lower;
+  return "unknown";
+}
+
+function getAvailabilityUtcDayKey(ms: number) {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+function getAvailabilityUtcDayStartMs(ms: number) {
+  const dayKey = getAvailabilityUtcDayKey(ms);
+  return Date.parse(`${dayKey}T00:00:00.000Z`);
+}
+
+function listAvailabilityDailyRollupsForDevice(db: DB, deviceId: number, sinceDayIso: string, untilDayIso: string) {
+  const rows = db
+    .prepare(
+      `SELECT device_id as deviceId, day, up_ms as upMs, down_ms as downMs, observed_ms as observedMs,
+              incident_count as incidentCount, updated_at as updatedAt
+       FROM availability_daily_rollups
+       WHERE device_id = ? AND day >= ? AND day <= ?
+       ORDER BY day ASC`
+    )
+    .all(deviceId, sinceDayIso, untilDayIso) as Array<{
+    deviceId: number;
+    day: string;
+    upMs: number;
+    downMs: number;
+    observedMs: number;
+    incidentCount: number;
+    updatedAt: string;
+  }>;
+  return rows.map(
+    (row) =>
+      ({
+        deviceId: row.deviceId,
+        day: row.day,
+        upMs: Number(row.upMs ?? 0),
+        downMs: Number(row.downMs ?? 0),
+        observedMs: Number(row.observedMs ?? 0),
+        incidentCount: Number(row.incidentCount ?? 0),
+        updatedAt: row.updatedAt,
+      }) satisfies AvailabilityDailyRollupRow
+  );
+}
+
+function addAvailabilityDailyInterval(
+  db: DB,
+  input: {
+    deviceId: number;
+    startTs: string;
+    endTs: string;
+    state: AvailabilityStateValue;
+  }
+) {
+  const startMs = parseAvailabilityTsMs(input.startTs);
+  const endMs = parseAvailabilityTsMs(input.endTs);
+  if (startMs == null || endMs == null || endMs <= startMs) return;
+  const now = new Date().toISOString();
+  let cursor = startMs;
+  while (cursor < endMs) {
+    const dayStartMs = getAvailabilityUtcDayStartMs(cursor);
+    const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+    const chunkEndMs = Math.min(endMs, dayEndMs);
+    const chunkMs = chunkEndMs - cursor;
+    if (chunkMs > 0) {
+      const dayKey = getAvailabilityUtcDayKey(cursor);
+      const upMs = input.state === "up" ? chunkMs : 0;
+      const downMs = input.state === "down" ? chunkMs : 0;
+      const observedMs = input.state === "unknown" ? 0 : chunkMs;
+      db.prepare(
+        `INSERT INTO availability_daily_rollups (device_id, day, up_ms, down_ms, observed_ms, incident_count, updated_at)
+         VALUES (?, ?, ?, ?, ?, 0, ?)
+         ON CONFLICT(device_id, day) DO UPDATE SET
+           up_ms = up_ms + excluded.up_ms,
+           down_ms = down_ms + excluded.down_ms,
+           observed_ms = observed_ms + excluded.observed_ms,
+           updated_at = excluded.updated_at`
+      ).run(input.deviceId, dayKey, upMs, downMs, observedMs, now);
+    }
+    cursor = chunkEndMs;
+  }
+}
+
+function incrementAvailabilityDailyIncident(db: DB, deviceId: number, tsIso: string) {
+  const tsMs = parseAvailabilityTsMs(tsIso);
+  if (tsMs == null) return;
+  const dayKey = getAvailabilityUtcDayKey(tsMs);
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO availability_daily_rollups (device_id, day, up_ms, down_ms, observed_ms, incident_count, updated_at)
+     VALUES (?, ?, 0, 0, 0, 1, ?)
+     ON CONFLICT(device_id, day) DO UPDATE SET
+       incident_count = incident_count + 1,
+       updated_at = excluded.updated_at`
+  ).run(deviceId, dayKey, now);
+}
+
+function pruneAvailabilityTransitionsBefore(db: DB, deviceId: number, cutoffIso: string) {
+  db.prepare(`DELETE FROM availability_transitions WHERE device_id = ? AND ts < ?`).run(deviceId, cutoffIso);
+}
+
+function pruneAvailabilityDailyRollupsBefore(db: DB, deviceId: number, cutoffIso: string) {
+  const cutoffMs = parseAvailabilityTsMs(cutoffIso);
+  if (cutoffMs == null) return;
+  const cutoffDay = getAvailabilityUtcDayKey(cutoffMs);
+  db.prepare(`DELETE FROM availability_daily_rollups WHERE device_id = ? AND day < ?`).run(deviceId, cutoffDay);
+}
+
+function accumulateAvailabilityTotalsFromSegments(segments: AvailabilitySegment[], startMs: number, endMs: number): AvailabilityTotals {
+  const totals = createAvailabilityTotals();
+  if (endMs <= startMs) return totals;
+  let lastState: AvailabilityStateValue | null = null;
+  for (const segment of segments) {
+    const overlapStart = Math.max(startMs, segment.startMs);
+    const overlapEnd = Math.min(endMs, segment.endMs);
+    const span = Math.max(0, overlapEnd - overlapStart);
+    if (!span) continue;
+    if (segment.state === "up") {
+      totals.upMs += span;
+    } else if (segment.state === "down") {
+      totals.downMs += span;
+      if (lastState !== "down") totals.incidentCount += 1;
+    }
+    lastState = segment.state;
+  }
+  return totals;
+}
+
+function accumulateAvailabilityTotalsFromDailyRows(rows: AvailabilityDailyRollupRow[], startMs: number, endMs: number): AvailabilityTotals {
+  const totals = createAvailabilityTotals();
+  if (endMs <= startMs) return totals;
+  for (const row of rows) {
+    const dayStartMs = Date.parse(`${row.day}T00:00:00.000Z`);
+    if (!Number.isFinite(dayStartMs)) continue;
+    const dayEndMs = dayStartMs + 24 * 60 * 60 * 1000;
+    const overlapStart = Math.max(startMs, dayStartMs);
+    const overlapEnd = Math.min(endMs, dayEndMs);
+    const span = Math.max(0, overlapEnd - overlapStart);
+    if (!span) continue;
+    if (row.observedMs <= 0) {
+      if (row.incidentCount > 0) totals.incidentCount += row.incidentCount;
+      continue;
+    }
+    const ratio = Math.min(Math.max(row.upMs / row.observedMs, 0), 1);
+    totals.upMs += span * ratio;
+    totals.downMs += span * (1 - ratio);
+    if (row.incidentCount > 0) totals.incidentCount += row.incidentCount;
+  }
+  return totals;
+}
+
+function summarizeAvailabilityTotals(totals: AvailabilityTotals): AvailabilityWindowStats {
+  const knownMs = totals.upMs + totals.downMs;
+  if (knownMs <= 0) {
+    return { overallPct: null, downtimeSeconds: null, incidentCount: null };
+  }
+  return {
+    overallPct: roundAvailabilityPct((totals.upMs / knownMs) * 100),
+    downtimeSeconds: Math.round(totals.downMs / 1000),
+    incidentCount: totals.incidentCount,
+  };
+}
+
+function getAvailabilityStateCurrentByDevice(db: DB, deviceId: number): AvailabilityStateCurrentRow | null {
+  const row = db
+    .prepare(
+      `SELECT device_id as deviceId, current_state as currentState, current_down_since as currentDownSince,
+              last_state_change_at as lastStateChangeAt, last_poll_at as lastPollAt, updated_at as updatedAt
+       FROM availability_state_current
+       WHERE device_id = ?
+       LIMIT 1`
+    )
+    .get(deviceId) as
+    | {
+        deviceId: number;
+        currentState: string;
+        currentDownSince: string | null;
+        lastStateChangeAt: string | null;
+        lastPollAt: string | null;
+        updatedAt: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    deviceId: row.deviceId,
+    currentState: normalizeAvailabilityState(row.currentState),
+    currentDownSince: row.currentDownSince ?? null,
+    lastStateChangeAt: row.lastStateChangeAt ?? null,
+    lastPollAt: row.lastPollAt ?? null,
+    updatedAt: row.updatedAt,
+  };
+}
+
+function getAvailabilityTransitionByDeviceAndTime(db: DB, deviceId: number, tsIso: string, direction: "before" | "atOrBefore") {
+  const comparator = direction === "before" ? "<" : "<=";
+  const row = db
+    .prepare(
+      `SELECT id, device_id as deviceId, ts, from_state as fromState, to_state as toState, latency_ms as latencyMs, created_at as createdAt
+       FROM availability_transitions
+       WHERE device_id = ? AND ts ${comparator} ?
+       ORDER BY ts DESC, id DESC
+       LIMIT 1`
+    )
+    .get(deviceId, tsIso) as
+    | {
+        id: number;
+        deviceId: number;
+        ts: string;
+        fromState: string;
+        toState: string;
+        latencyMs: number | null;
+        createdAt: string;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    id: row.id,
+    deviceId: row.deviceId,
+    ts: row.ts,
+    tsMs: parseAvailabilityTsMs(row.ts) ?? 0,
+    fromState: normalizeAvailabilityState(row.fromState),
+    toState: normalizeAvailabilityState(row.toState),
+    latencyMs: row.latencyMs ?? null,
+    createdAt: row.createdAt,
+  } satisfies AvailabilityHistoryEvent;
+}
+
+function listAvailabilityTransitionsForDevice(db: DB, deviceId: number, sinceIso: string, untilIso: string) {
+  const rows = db
+    .prepare(
+      `SELECT id, device_id as deviceId, ts, from_state as fromState, to_state as toState, latency_ms as latencyMs, created_at as createdAt
+       FROM availability_transitions
+       WHERE device_id = ? AND ts >= ? AND ts <= ?
+       ORDER BY ts ASC, id ASC`
+    )
+    .all(deviceId, sinceIso, untilIso) as Array<{
+    id: number;
+    deviceId: number;
+    ts: string;
+    fromState: string;
+    toState: string;
+    latencyMs: number | null;
+    createdAt: string;
+  }>;
+  return rows.map(
+    (row) =>
+      ({
+        id: row.id,
+        deviceId: row.deviceId,
+        ts: row.ts,
+        tsMs: parseAvailabilityTsMs(row.ts) ?? 0,
+        fromState: normalizeAvailabilityState(row.fromState),
+        toState: normalizeAvailabilityState(row.toState),
+        latencyMs: row.latencyMs ?? null,
+        createdAt: row.createdAt,
+      }) satisfies AvailabilityHistoryEvent
+  );
+}
+
+function getAvailabilityStateSnapshot(db: DB, deviceId: number, nowIso: string) {
+  const current = getAvailabilityStateCurrentByDevice(db, deviceId);
+  if (current) return current;
+
+  const latest = getAvailabilityTransitionByDeviceAndTime(db, deviceId, nowIso, "atOrBefore");
+  if (!latest) return null;
+
+  return {
+    deviceId,
+    currentState: latest.toState,
+    currentDownSince: latest.toState === "down" ? latest.ts : null,
+    lastStateChangeAt: latest.ts,
+    lastPollAt: latest.ts,
+    updatedAt: latest.createdAt,
+  } satisfies AvailabilityStateCurrentRow;
+}
+
+function buildAvailabilityHistoryContext(db: DB, deviceId: number, nowIso = new Date().toISOString()): AvailabilityHistoryContext | null {
+  const nowMs = Date.parse(nowIso);
+  if (!Number.isFinite(nowMs)) return null;
+  const earliestIso = new Date(nowMs - AVAILABILITY_RAW_WINDOW_MS).toISOString();
+  const snapshot = getAvailabilityStateSnapshot(db, deviceId, nowIso);
+  const baseTransition = getAvailabilityTransitionByDeviceAndTime(db, deviceId, earliestIso, "before");
+  const events = listAvailabilityTransitionsForDevice(db, deviceId, earliestIso, nowIso);
+  const baseState = baseTransition?.toState ?? events[0]?.fromState ?? snapshot?.currentState ?? "unknown";
+  return { current: snapshot, baseState, events, nowMs, nowIso };
+}
+
+function buildAvailabilitySegments(context: AvailabilityHistoryContext, startMs: number, endMs: number): AvailabilitySegment[] {
+  if (endMs <= startMs) return [];
+  let state = context.baseState;
+  for (const event of context.events) {
+    if (event.tsMs > startMs) break;
+    state = event.toState;
+  }
+
+  const segments: AvailabilitySegment[] = [];
+  let cursor = startMs;
+  for (const event of context.events) {
+    if (event.tsMs <= startMs) continue;
+    if (event.tsMs > endMs) break;
+    if (event.tsMs > cursor) {
+      segments.push({ startMs: cursor, endMs: event.tsMs, state });
+    }
+    state = event.toState;
+    cursor = event.tsMs;
+  }
+
+  if (cursor < endMs) {
+    segments.push({ startMs: cursor, endMs, state });
+  }
+  return segments;
+}
+
+function summarizeAvailabilitySegments(segments: AvailabilitySegment[], startMs: number, endMs: number): AvailabilityWindowStats {
+  if (endMs <= startMs) {
+    return { overallPct: null, downtimeSeconds: null, incidentCount: null };
+  }
+  return summarizeAvailabilityTotals(accumulateAvailabilityTotalsFromSegments(segments, startMs, endMs));
+}
+
+function buildAvailabilityBucketPoints(segments: AvailabilitySegment[], startMs: number, endMs: number, bucketMs: number) {
+  const points: Array<{ ts: string; upPct: number; state?: string }> = [];
+  if (bucketMs <= 0 || endMs <= startMs) return points;
+
+  for (let bucketStart = startMs; bucketStart < endMs; bucketStart += bucketMs) {
+    const bucketEnd = Math.min(bucketStart + bucketMs, endMs);
+    const bucketSpan = bucketEnd - bucketStart;
+    if (bucketSpan <= 0) continue;
+
+    let upMs = 0;
+    let downMs = 0;
+    for (const segment of segments) {
+      const overlapStart = Math.max(bucketStart, segment.startMs);
+      const overlapEnd = Math.min(bucketEnd, segment.endMs);
+      const overlap = Math.max(0, overlapEnd - overlapStart);
+      if (!overlap) continue;
+      if (segment.state === "up") upMs += overlap;
+      else if (segment.state === "down") downMs += overlap;
+    }
+
+    const knownMs = upMs + downMs;
+    if (knownMs <= 0) {
+      points.push({ ts: new Date(bucketStart).toISOString(), upPct: 0, state: "unknown" });
+      continue;
+    }
+
+    const upPct = roundAvailabilityPct((upMs / bucketSpan) * 100);
+    points.push({
+      ts: new Date(bucketStart).toISOString(),
+      upPct,
+      state: upPct >= 50 ? "up" : "down",
+    });
+  }
+
+  return points;
+}
+
+function getAvailabilityWindowTotals(
+  db: DB,
+  deviceId: number,
+  startMs: number,
+  endMs: number,
+  context?: AvailabilityHistoryContext | null
+) {
+  const totals = createAvailabilityTotals();
+  if (endMs <= startMs) return totals;
+
+  const rawWindowStartMs = endMs - AVAILABILITY_RAW_WINDOW_MS;
+  const rawStartMs = Math.max(startMs, rawWindowStartMs);
+  const rawContext = context ?? buildAvailabilityHistoryContext(db, deviceId, new Date(endMs).toISOString());
+  if (rawContext && endMs > rawStartMs) {
+    const rawSegments = buildAvailabilitySegments(rawContext, rawStartMs, endMs);
+    addAvailabilityTotals(totals, accumulateAvailabilityTotalsFromSegments(rawSegments, rawStartMs, endMs));
+  }
+
+  if (startMs < rawWindowStartMs) {
+    const dailyStartIso = new Date(startMs).toISOString().slice(0, 10);
+    const dailyEndIso = new Date(Math.min(endMs, rawWindowStartMs)).toISOString().slice(0, 10);
+    const rows = listAvailabilityDailyRollupsForDevice(db, deviceId, dailyStartIso, dailyEndIso);
+    addAvailabilityTotals(totals, accumulateAvailabilityTotalsFromDailyRows(rows, startMs, Math.min(endMs, rawWindowStartMs)));
+  }
+
+  return totals;
+}
+
+function buildAvailabilityBucketPointsWithRollups(
+  db: DB,
+  deviceId: number,
+  startMs: number,
+  endMs: number,
+  bucketMs: number,
+  context?: AvailabilityHistoryContext | null
+) {
+  const points: Array<{ ts: string; upPct: number; state?: string }> = [];
+  if (bucketMs <= 0 || endMs <= startMs) return points;
+
+  const rawWindowStartMs = endMs - AVAILABILITY_RAW_WINDOW_MS;
+  const rawContext = context ?? buildAvailabilityHistoryContext(db, deviceId, new Date(endMs).toISOString());
+  const rawSegments = rawContext && endMs > rawWindowStartMs ? buildAvailabilitySegments(rawContext, Math.max(startMs, rawWindowStartMs), endMs) : [];
+  const dailyRows =
+    startMs < rawWindowStartMs
+      ? listAvailabilityDailyRollupsForDevice(db, deviceId, new Date(startMs).toISOString().slice(0, 10), new Date(Math.min(endMs, rawWindowStartMs)).toISOString().slice(0, 10))
+      : [];
+
+  for (let bucketStart = startMs; bucketStart < endMs; bucketStart += bucketMs) {
+    const bucketEnd = Math.min(bucketStart + bucketMs, endMs);
+    const totals = createAvailabilityTotals();
+
+    if (bucketStart < rawWindowStartMs && dailyRows.length) {
+      addAvailabilityTotals(totals, accumulateAvailabilityTotalsFromDailyRows(dailyRows, bucketStart, Math.min(bucketEnd, rawWindowStartMs)));
+    }
+    if (bucketEnd > rawWindowStartMs && rawSegments.length) {
+      addAvailabilityTotals(totals, accumulateAvailabilityTotalsFromSegments(rawSegments, Math.max(bucketStart, rawWindowStartMs), bucketEnd));
+    }
+
+    const knownMs = totals.upMs + totals.downMs;
+    if (knownMs <= 0) {
+      points.push({ ts: new Date(bucketStart).toISOString(), upPct: 0, state: "unknown" });
+      continue;
+    }
+
+    const upPct = roundAvailabilityPct((totals.upMs / knownMs) * 100);
+    points.push({
+      ts: new Date(bucketStart).toISOString(),
+      upPct,
+      state: upPct >= 50 ? "up" : "down",
+    });
+  }
+
+  return points;
+}
+
+export function recordAvailabilityPingResult(
+  db: DB,
+  input: {
+    deviceId: number;
+    state: AvailabilityStateValue;
+    ts: string;
+    latencyMs?: number | null;
+  }
+) {
+  const now = new Date().toISOString();
+  const tx = db.transaction(() => {
+    const current = getAvailabilityStateCurrentByDevice(db, input.deviceId);
+    const priorState = current?.currentState ?? "unknown";
+    const priorPollAt = current?.lastPollAt ?? null;
+    const priorPollMs = parseAvailabilityTsMs(priorPollAt);
+    const inputTsMs = parseAvailabilityTsMs(input.ts);
+    const stateChanged = !current || priorState !== input.state;
+
+    if (priorPollAt && priorPollMs != null && inputTsMs != null && inputTsMs > priorPollMs && priorState !== "unknown") {
+      addAvailabilityDailyInterval(db, {
+        deviceId: input.deviceId,
+        startTs: priorPollAt,
+        endTs: input.ts,
+        state: priorState,
+      });
+    }
+
+    if (stateChanged) {
+      db.prepare(
+        `INSERT INTO availability_transitions (device_id, ts, from_state, to_state, latency_ms, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`
+      ).run(input.deviceId, input.ts, priorState, input.state, input.latencyMs ?? null, now);
+    }
+
+    if (stateChanged && input.state === "down") {
+      incrementAvailabilityDailyIncident(db, input.deviceId, input.ts);
+    }
+
+    const nextCurrentDownSince =
+      input.state === "down"
+        ? current?.currentState === "down"
+          ? current.currentDownSince ?? current.lastStateChangeAt ?? input.ts
+          : input.ts
+        : null;
+    const nextLastStateChangeAt = stateChanged ? input.ts : current?.lastStateChangeAt ?? input.ts;
+
+    db.prepare(
+      `INSERT INTO availability_state_current (device_id, current_state, current_down_since, last_state_change_at, last_poll_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?)
+       ON CONFLICT(device_id) DO UPDATE SET
+         current_state = excluded.current_state,
+         current_down_since = excluded.current_down_since,
+         last_state_change_at = excluded.last_state_change_at,
+         last_poll_at = excluded.last_poll_at,
+         updated_at = excluded.updated_at`
+    ).run(
+      input.deviceId,
+      input.state,
+      nextCurrentDownSince,
+      nextLastStateChangeAt,
+      input.ts,
+      now
+    );
+
+    if (inputTsMs != null) {
+      pruneAvailabilityTransitionsBefore(db, input.deviceId, new Date(inputTsMs - AVAILABILITY_RAW_WINDOW_MS).toISOString());
+      pruneAvailabilityDailyRollupsBefore(db, input.deviceId, new Date(inputTsMs - 30 * 24 * 60 * 60 * 1000).toISOString());
+    }
+  });
+
+  tx();
+}
+
+export function getAvailabilityHistorySummary(db: DB, deviceId: number): AvailabilitySummaryResponse | null {
+  const device = getDeviceById(db, deviceId);
+  if (!device) return null;
+
+  const nowIso = new Date().toISOString();
+  const context = buildAvailabilityHistoryContext(db, deviceId, nowIso);
+  if (!context) {
+    return {
+      deviceId: String(deviceId),
+      collectorId: null,
+      availabilitySummary: {
+        last1hPct: null,
+        last24hPct: null,
+        last7dPct: null,
+        last30dPct: null,
+        currentDownSince: null,
+        lastStateChangeAt: null,
+        previewPoints: [],
+        previewRange: "24h",
+        previewResolution: "5m",
+        previewFreshAt: nowIso,
+      },
+      sla: null,
+      updatedAt: nowIso,
+    };
+  }
+
+  const hasKnownAvailability = Boolean(context.current) || context.events.length > 0;
+
+  const windowSummaries = (Object.entries(AVAILABILITY_SUMMARY_WINDOWS) as Array<[keyof typeof AVAILABILITY_SUMMARY_WINDOWS, number]>).reduce(
+    (acc, [label, windowMs]) => {
+      const startMs = context.nowMs - windowMs;
+      const totals = getAvailabilityWindowTotals(db, deviceId, startMs, context.nowMs, context);
+      acc[label] = summarizeAvailabilityTotals(totals).overallPct;
+      return acc;
+    },
+    {} as Record<keyof typeof AVAILABILITY_SUMMARY_WINDOWS, number | null>
+  );
+
+  const previewPoints = hasKnownAvailability
+    ? (() => {
+        const previewStartMs = context.nowMs - AVAILABILITY_SUMMARY_WINDOWS["24h"];
+        const previewSegments = buildAvailabilitySegments(context, previewStartMs, context.nowMs);
+        return buildAvailabilityBucketPoints(previewSegments, previewStartMs, context.nowMs, AVAILABILITY_BUCKETS["5m"]).map((p) => ({
+          ts: p.ts,
+          value: p.upPct,
+        }));
+      })()
+    : [];
+
+  return {
+    deviceId: String(deviceId),
+    collectorId: null,
+    availabilitySummary: {
+      last1hPct: windowSummaries["1h"],
+      last24hPct: windowSummaries["24h"],
+      last7dPct: windowSummaries["7d"],
+      last30dPct: windowSummaries["30d"],
+      currentDownSince: context.current?.currentState === "down" ? context.current.currentDownSince ?? context.current.lastStateChangeAt ?? null : null,
+      lastStateChangeAt: context.current?.lastStateChangeAt ?? null,
+      previewPoints,
+      previewRange: "24h",
+      previewResolution: "5m",
+      previewFreshAt: nowIso,
+    },
+    sla: null,
+    updatedAt: nowIso,
+  };
+}
+
+export function getAvailabilityChart(db: DB, deviceId: number, range: "24h" | "7d" | "30d", resolution: "5m" | "1h" | "1d"): AvailabilityChartResponse | null {
+  const device = getDeviceById(db, deviceId);
+  if (!device) return null;
+
+  const resolutionWindow = {
+    "24h": { rangeMs: AVAILABILITY_SUMMARY_WINDOWS["24h"], bucketMs: AVAILABILITY_BUCKETS["5m"] },
+    "7d": { rangeMs: AVAILABILITY_SUMMARY_WINDOWS["7d"], bucketMs: AVAILABILITY_BUCKETS["1h"] },
+    "30d": { rangeMs: AVAILABILITY_SUMMARY_WINDOWS["30d"], bucketMs: AVAILABILITY_BUCKETS["1d"] },
+  } as const;
+
+  const expected = resolutionWindow[range];
+  if (!expected || expected.bucketMs !== AVAILABILITY_BUCKETS[resolution]) {
+    return null;
+  }
+
+  const nowIso = new Date().toISOString();
+  const context = buildAvailabilityHistoryContext(db, deviceId, nowIso);
+  if (!context) {
+    return {
+      deviceId: String(deviceId),
+      range,
+      resolution,
+      source: "collector",
+      cached: false,
+      generatedAt: nowIso,
+      points: [],
+      summary: { overallPct: null, downtimeSeconds: null, incidentCount: null },
+    };
+  }
+
+  const startMs = context.nowMs - expected.rangeMs;
+  const totals = getAvailabilityWindowTotals(db, deviceId, startMs, context.nowMs, context);
+  const summary = summarizeAvailabilityTotals(totals);
+  if (totals.upMs + totals.downMs <= 0) {
+    return {
+      deviceId: String(deviceId),
+      range,
+      resolution,
+      source: "collector",
+      cached: false,
+      generatedAt: nowIso,
+      points: [],
+      summary,
+    };
+  }
+  const points =
+    range === "24h"
+      ? buildAvailabilityBucketPoints(buildAvailabilitySegments(context, startMs, context.nowMs), startMs, context.nowMs, expected.bucketMs)
+      : buildAvailabilityBucketPointsWithRollups(db, deviceId, startMs, context.nowMs, expected.bucketMs, context);
+
+  return {
+    deviceId: String(deviceId),
+    range,
+    resolution,
+    source: "collector",
+    cached: false,
+    generatedAt: nowIso,
+    points,
+    summary,
+  };
 }
 
 export type PollProfileRow = {

@@ -13,6 +13,7 @@ import {
   unclaimPollJobById,
   getWorkerRegistrationByName,
   getPollJobDetail,
+  recordAvailabilityPingResult,
   licenseAllowsCollection,
   getAllAppConfig,
   type DB,
@@ -276,6 +277,12 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
           lastFailureAt: success ? undefined : resultPayload.processedAt,
           lastPollAt: resultPayload.processedAt,
           lastError: success ? null : resultPayload.error ?? null,
+          latencyMs: probe?.latencyMs ?? null,
+        });
+        recordAvailabilityPingResult(db, {
+          deviceId: detail.device.id,
+          state: success ? "up" : "down",
+          ts: resultPayload.processedAt,
           latencyMs: probe?.latencyMs ?? null,
         });
 
