@@ -1461,7 +1461,6 @@ function buildAvailabilityBucketPoints(segments: AvailabilitySegment[], startMs:
 
     const knownMs = upMs + downMs;
     if (knownMs <= 0) {
-      points.push({ ts: new Date(bucketStart).toISOString(), upPct: 0, state: "unknown" });
       continue;
     }
 
@@ -1536,7 +1535,6 @@ function buildAvailabilityBucketPointsWithRollups(
 
     const knownMs = totals.upMs + totals.downMs;
     if (knownMs <= 0) {
-      points.push({ ts: new Date(bucketStart).toISOString(), upPct: 0, state: "unknown" });
       continue;
     }
 
