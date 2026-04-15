@@ -6,6 +6,7 @@ import { sendPing, fetchCollectorConfig, type CloudAuthState } from "./xmon-clie
 import { enqueueTelemetry, startTelemetryQueue } from "./telemetry-queue.js";
 import { getAllAppConfig, getDevicePollHealth, listDevices, listPollProfiles, listPollTargets, updateCloudSyncState, upsertAppConfigEntries } from "./db.js";
 import { enqueueDeviceSnapshot, enqueueDeviceState, enqueueSnmpProfileSnapshot, enqueueSnmpPollerSnapshot } from "./telemetry-queue.js";
+import { startCollectorRpcSession } from "./collector-rpc-session.js";
 
 type BackoffState = { attempts: number };
 
@@ -156,6 +157,8 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
     };
   }
 
+  const stopRpcSession = startCollectorRpcSession(db, resolveCloudCfg);
+
   async function heartbeatLoop() {
     while (!stopped) {
       let retryAfterSec: number | undefined;
@@ -228,5 +231,6 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
 
   return () => {
     stopped = true;
+    stopRpcSession();
   };
 }
