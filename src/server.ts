@@ -803,6 +803,8 @@ const server = createServer((req, res) => {
             site: typeof body.site === "string" ? body.site : undefined,
             org: typeof body.org === "string" ? body.org : undefined,
             type: typeof body.type === "string" ? body.type : undefined,
+            assetTag: body.assetTag === null ? null : typeof body.assetTag === "string" ? body.assetTag : undefined,
+            serialNumber: body.serialNumber === null ? null : typeof body.serialNumber === "string" ? body.serialNumber : undefined,
           });
           logAdminAuditEvent(db, {
             entityType: "device",
@@ -848,6 +850,8 @@ const server = createServer((req, res) => {
             site: body.site === undefined ? undefined : body.site,
             org: body.org === undefined ? undefined : body.org,
             type: typeof body.type === "string" ? body.type : undefined,
+            assetTag: body.assetTag === undefined ? undefined : body.assetTag === null ? null : String(body.assetTag),
+            serialNumber: body.serialNumber === undefined ? undefined : body.serialNumber === null ? null : String(body.serialNumber),
           });
           if (!updated) {
             res.writeHead(404);

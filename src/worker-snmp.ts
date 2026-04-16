@@ -17,6 +17,7 @@ import {
   replaceInterfaceSnapshotsForDevice,
   replaceLldpNeighborsForDevice,
   upsertDiscoveredDeviceCandidatesFromLldp,
+  updateDeviceIdentity,
   licenseAllowsCollection,
   getAllAppConfig,
   getLastInterfaceCounters,
@@ -33,6 +34,7 @@ import {
   startTelemetryQueue,
   flushTelemetryNow,
 } from "./telemetry-queue.js";
+import { publishDeviceIdentityUpdate } from "./xmon-client.js";
 
 type WorkerConfig = {
   workerName: string;
@@ -71,7 +73,12 @@ function log(data: Record<string, any>) {
   );
 }
 
-async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: boolean }) {
+async function runLoop(
+  db: DB,
+  workerCfg: WorkerConfig,
+  shuttingDown: { flag: boolean },
+  baseCfg: ReturnType<typeof loadConfig>
+) {
   let currentJobIds = new Set<number>();
   let heartbeatHandle: NodeJS.Timeout | null = null;
 
@@ -262,10 +269,11 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
               const res = await processSnmpJob(detail, workerCfg);
               let status: "completed" | "failed" = res.success ? "completed" : "failed";
               const processedAt = new Date().toISOString();
+              let persistedIdentity: { assetTag: string | null; serialNumber: string | null } | null = null;
 
               if (res.success) {
                 try {
-                  persistDiscoveryNormalization(db, detail.device.id, res.discovery, processedAt);
+                  persistedIdentity = persistDiscoveryNormalization(db, detail.device.id, res.discovery, processedAt);
                 } catch (err: any) {
                   // treat as partial warning; keep core success
                   res.warnings = [...(res.warnings ?? []), err?.message ?? "snmp_persistence_failed"];
@@ -307,6 +315,8 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
                 name: detail.device.hostname,
                 ip: detail.device.ipAddress,
                 deviceType: detail.device.type ?? detail.device.kind ?? undefined,
+                assetTag: persistedIdentity?.assetTag ?? detail.device.assetTag ?? null,
+                serialNumber: persistedIdentity?.serialNumber ?? detail.device.serialNumber ?? null,
                 status: res.success ? "up" : "down",
                 snmpProfileId: detail.profile?.id ? String(detail.profile.id) : null,
                 snmpPollerIds: detail.profile?.id ? [`poller-${detail.profile.id}`] : undefined,
@@ -314,6 +324,25 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
                 failureCount: res.success ? 0 : 1,
                 ts: processedAt,
               });
+              if (persistedIdentity) {
+                const latest = getAllAppConfig(db);
+                void publishDeviceIdentityUpdate(
+                  {
+                    ...baseCfg,
+                    xmonApiBase: latest["XMON_API_BASE"] || baseCfg.xmonApiBase,
+                    xmonCollectorId: latest["XMON_COLLECTOR_ID"] || baseCfg.xmonCollectorId,
+                    xmonApiKey: latest["XMON_API_KEY"] || baseCfg.xmonApiKey,
+                  },
+                  {
+                    deviceId: String(detail.device.id),
+                    updatedAt: processedAt,
+                    assetTag: persistedIdentity.assetTag,
+                    serialNumber: persistedIdentity.serialNumber,
+                  },
+                ).catch(() => {
+                  /* ignore */
+                });
+              }
           enqueueDeviceState({
             deviceId: detail.device.id,
             status: res.success ? "up" : "unknown", // ping is authoritative; avoid flipping down on SNMP-only failures
@@ -437,7 +466,7 @@ async function main() {
     shutdown("SIGTERM").catch(() => process.exit(1));
   });
 
-  await runLoop(db, workerCfg, shuttingDown);
+  await runLoop(db, workerCfg, shuttingDown, config);
 }
 
 main().catch((err) => {
@@ -453,6 +482,10 @@ async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<{ s
   try {
     // Core reachability: system fetch must succeed
     const system = await snmpGetSystem(workerCfg.snmpGetPath, target, profileConfig, timeoutMs);
+    const serialNumber = await snmpGetSerialNumber(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs).catch(() => null);
+    if (serialNumber) {
+      system.serialNumber = serialNumber;
+    }
 
     // Extended discovery: best-effort so partial failures don't mark device down
     const errors: string[] = [];
@@ -509,7 +542,16 @@ async function snmpGetSystem(snmpGetPath: string, target: string, profileConfig:
     sysDescr: parsed["1.3.6.1.2.1.1.1.0"] ?? null,
     sysObjectId: parsed["1.3.6.1.2.1.1.2.0"] ?? null,
     sysUpTime: parsed["1.3.6.1.2.1.1.3.0"] ?? null,
+    serialNumber: null as string | null,
   };
+}
+
+async function snmpGetSerialNumber(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number) {
+  const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const entPhysicalSerialNum = "1.3.6.1.2.1.47.1.1.1.1.11";
+  const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), entPhysicalSerialNum];
+  const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
+  return parseSnmpSerial(stdout);
 }
 
 async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number) {
@@ -592,6 +634,23 @@ function parseSnmpGet(stdout: string): Record<string, string> {
     out[oidPart] = value;
   }
   return out;
+}
+
+function parseSnmpSerial(stdout: string): string | null {
+  const lines = stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  for (const line of lines) {
+    const [, restRaw] = line.split(" = ").map((s) => s.trim());
+    if (!restRaw) continue;
+    const value = snmpValueToString(restRaw).trim();
+    if (!value) continue;
+    const lower = value.toLowerCase();
+    if (lower === "unknown" || lower === "none" || lower === "n/a" || lower === "not set") continue;
+    return value;
+  }
+  return null;
 }
 
 function parseInterfaces(stdout: string) {
@@ -812,11 +871,22 @@ function persistDiscoveryNormalization(
   deviceId: number,
   discovery: { system: any; interfaces: any[]; lldpNeighbors: any[] },
   collectedAt: string
-) {
+): { assetTag: string | null; serialNumber: string | null } | null {
+  const normalizedSerial =
+    typeof discovery?.system?.serialNumber === "string" && discovery.system.serialNumber.trim()
+      ? discovery.system.serialNumber.trim()
+      : null;
   saveSnmpSystemSnapshot(db, {
     deviceId,
-    system: discovery.system ?? {},
+    system: {
+      ...(discovery.system ?? {}),
+      serialNumber: normalizedSerial,
+    },
     collectedAt,
+  });
+  const updatedIdentity = updateDeviceIdentity(db, {
+    id: deviceId,
+    ...(normalizedSerial ? { serialNumber: normalizedSerial } : {}),
   });
   try {
     const sys = discovery.system ?? {};
@@ -827,6 +897,7 @@ function persistDiscoveryNormalization(
       sysLocation: sys.sysLocation ?? sys.sys_location ?? null,
       sysContact: sys.sysContact ?? sys.sys_contact ?? null,
       sysUptime: parseSysUptimeValue(sys.sysUpTime ?? sys.sys_uptime),
+      serialNumber: normalizedSerial,
       collectedAt,
     });
   } catch (err) {
@@ -1027,4 +1098,10 @@ function persistDiscoveryNormalization(
   } catch {
     // ignore fast flush errors; periodic flush will handle
   }
+
+  if (!updatedIdentity) return null;
+  return {
+    assetTag: updatedIdentity.assetTag ?? null,
+    serialNumber: updatedIdentity.serialNumber ?? null,
+  };
 }

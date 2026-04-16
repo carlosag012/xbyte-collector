@@ -28,6 +28,8 @@ export function enqueueDeviceSnapshot(item: {
   name?: string;
   ip?: string;
   deviceType?: string;
+  assetTag?: string | null;
+  serialNumber?: string | null;
   status?: "up" | "down" | "unknown";
   snmpProfileId?: string | null;
   snmpPollerIds?: string[] | null;
@@ -45,6 +47,8 @@ export function enqueueDeviceSnapshot(item: {
       name: item.name,
       ip: item.ip,
       deviceType: item.deviceType,
+      assetTag: item.assetTag ?? null,
+      serialNumber: item.serialNumber ?? null,
       status: item.status,
       snmpProfileId: item.snmpProfileId ?? null,
       snmpPollerIds: item.snmpPollerIds,
@@ -201,6 +205,7 @@ export function enqueueSnmpSystemSnapshot(item: {
   sysLocation?: string | null;
   sysContact?: string | null;
   sysUptime?: number | null;
+  serialNumber?: string | null;
   collectedAt?: string | Date;
 }) {
   enqueueTelemetry({
@@ -215,6 +220,7 @@ export function enqueueSnmpSystemSnapshot(item: {
       sysLocation: item.sysLocation,
       sysContact: item.sysContact,
       sysUptime: item.sysUptime,
+      serialNumber: item.serialNumber ?? null,
       collectedAt: item.collectedAt ? new Date(item.collectedAt).toISOString() : undefined,
     },
   });

@@ -48,6 +48,8 @@ export function initDatabase(config: AppConfig): DB {
       site TEXT,
       type TEXT,
       org TEXT,
+      asset_tag TEXT,
+      serial_number TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -191,6 +193,7 @@ export function initDatabase(config: AppConfig): DB {
       sys_descr TEXT,
       sys_object_id TEXT,
       sys_uptime TEXT,
+      serial_number TEXT,
       collected_at TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
@@ -351,7 +354,25 @@ export function initDatabase(config: AppConfig): DB {
   }
 
   try {
+    db.prepare(`ALTER TABLE snmp_system_snapshots ADD COLUMN serial_number TEXT`).run();
+  } catch {
+    // ignore if it already exists
+  }
+
+  try {
     db.prepare(`ALTER TABLE devices ADD COLUMN type TEXT`).run();
+  } catch {
+    // ignore if it already exists
+  }
+
+  try {
+    db.prepare(`ALTER TABLE devices ADD COLUMN asset_tag TEXT`).run();
+  } catch {
+    // ignore if it already exists
+  }
+
+  try {
+    db.prepare(`ALTER TABLE devices ADD COLUMN serial_number TEXT`).run();
   } catch {
     // ignore if it already exists
   }
@@ -685,6 +706,8 @@ export type DeviceRow = {
   site: string | null;
   type: string | null;
   org: string | null;
+  assetTag: string | null;
+  serialNumber: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -820,7 +843,9 @@ type AvailabilityChartResponse = {
 export function listDevices(db: DB): DeviceRow[] {
   const rows = db
     .prepare(
-      `SELECT id, hostname, ip_address as ipAddress, enabled, site, type, org, created_at as createdAt, updated_at as updatedAt
+      `SELECT id, hostname, ip_address as ipAddress, enabled, site, type, org,
+              asset_tag as assetTag, serial_number as serialNumber,
+              created_at as createdAt, updated_at as updatedAt
        FROM devices ORDER BY id`
     )
     .all() as Array<{
@@ -831,6 +856,8 @@ export function listDevices(db: DB): DeviceRow[] {
     site: string | null;
     type: string | null;
     org: string | null;
+    assetTag: string | null;
+    serialNumber: string | null;
     createdAt: string;
     updatedAt: string;
   }>;
@@ -840,7 +867,9 @@ export function listDevices(db: DB): DeviceRow[] {
 export function findDeviceByIpOrHostname(db: DB, input: { ipAddress?: string; hostname?: string }): DeviceRow | null {
   const row = db
     .prepare(
-      `SELECT id, hostname, ip_address as ipAddress, enabled, site, type, org, created_at as createdAt, updated_at as updatedAt
+      `SELECT id, hostname, ip_address as ipAddress, enabled, site, type, org,
+              asset_tag as assetTag, serial_number as serialNumber,
+              created_at as createdAt, updated_at as updatedAt
        FROM devices
        WHERE (${input.ipAddress ? "ip_address = ?" : "0"}) OR (${input.hostname ? "hostname = ?" : "0"})
        ORDER BY id LIMIT 1`
@@ -862,6 +891,8 @@ export function findDeviceByIpOrHostname(db: DB, input: { ipAddress?: string; ho
         site: string | null;
         type: string | null;
         org: string | null;
+        assetTag: string | null;
+        serialNumber: string | null;
         createdAt: string;
         updatedAt: string;
       }
@@ -869,7 +900,16 @@ export function findDeviceByIpOrHostname(db: DB, input: { ipAddress?: string; ho
   return row ? { ...row, enabled: Boolean(row.enabled), type: row.type ?? null } : null;
 }
 
-export function createDevice(db: DB, input: { hostname: string; ipAddress: string; enabled?: boolean; site?: string; org?: string; type?: string }): DeviceRow {
+export function createDevice(db: DB, input: {
+  hostname: string;
+  ipAddress: string;
+  enabled?: boolean;
+  site?: string;
+  org?: string;
+  type?: string;
+  assetTag?: string | null;
+  serialNumber?: string | null;
+}): DeviceRow {
   const now = new Date().toISOString();
   const enabled = input.enabled ?? true;
   const dup = db
@@ -881,10 +921,21 @@ export function createDevice(db: DB, input: { hostname: string; ipAddress: strin
   }
   const result = db
     .prepare(
-      `INSERT INTO devices (hostname, ip_address, enabled, site, type, org, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO devices (hostname, ip_address, enabled, site, type, org, asset_tag, serial_number, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(input.hostname, input.ipAddress, enabled ? 1 : 0, input.site ?? null, input.type ?? null, input.org ?? null, now, now);
+    .run(
+      input.hostname,
+      input.ipAddress,
+      enabled ? 1 : 0,
+      input.site ?? null,
+      input.type ?? null,
+      input.org ?? null,
+      input.assetTag ?? null,
+      input.serialNumber ?? null,
+      now,
+      now
+    );
   return {
     id: Number(result.lastInsertRowid),
     hostname: input.hostname,
@@ -893,6 +944,8 @@ export function createDevice(db: DB, input: { hostname: string; ipAddress: strin
     site: input.site ?? null,
     type: input.type ?? null,
     org: input.org ?? null,
+    assetTag: input.assetTag ?? null,
+    serialNumber: input.serialNumber ?? null,
     createdAt: now,
     updatedAt: now,
   };
@@ -1113,7 +1166,9 @@ export function getDevicePollHealth(
 export function getDeviceById(db: DB, id: number): DeviceRow | null {
   const row = db
     .prepare(
-      `SELECT id, hostname, ip_address as ipAddress, enabled, site, type, org, created_at as createdAt, updated_at as updatedAt
+      `SELECT id, hostname, ip_address as ipAddress, enabled, site, type, org,
+              asset_tag as assetTag, serial_number as serialNumber,
+              created_at as createdAt, updated_at as updatedAt
        FROM devices WHERE id = ? LIMIT 1`
     )
     .get(id) as
@@ -1125,6 +1180,8 @@ export function getDeviceById(db: DB, id: number): DeviceRow | null {
         site: string | null;
         type: string | null;
         org: string | null;
+        assetTag: string | null;
+        serialNumber: string | null;
         createdAt: string;
         updatedAt: string;
       }
@@ -1135,7 +1192,17 @@ export function getDeviceById(db: DB, id: number): DeviceRow | null {
 
 export function updateDevice(
   db: DB,
-  input: { id: number; hostname?: string; ipAddress?: string; enabled?: boolean; site?: string | null; org?: string | null; type?: string | null }
+  input: {
+    id: number;
+    hostname?: string;
+    ipAddress?: string;
+    enabled?: boolean;
+    site?: string | null;
+    org?: string | null;
+    type?: string | null;
+    assetTag?: string | null;
+    serialNumber?: string | null;
+  }
 ): DeviceRow | null {
   const existing = getDeviceById(db, input.id);
   if (!existing) return null;
@@ -1147,12 +1214,52 @@ export function updateDevice(
     site: input.site === undefined ? existing.site : input.site,
     org: input.org === undefined ? existing.org : input.org,
     type: input.type === undefined ? existing.type : input.type,
+    assetTag: input.assetTag === undefined ? existing.assetTag : input.assetTag,
+    serialNumber: input.serialNumber === undefined ? existing.serialNumber : input.serialNumber,
   };
   db.prepare(
     `UPDATE devices
-     SET hostname = ?, ip_address = ?, enabled = ?, site = ?, type = ?, org = ?, updated_at = ?
+     SET hostname = ?, ip_address = ?, enabled = ?, site = ?, type = ?, org = ?, asset_tag = ?, serial_number = ?, updated_at = ?
      WHERE id = ?`
-  ).run(next.hostname, next.ipAddress, next.enabled ? 1 : 0, next.site, next.type ?? null, next.org, now, input.id);
+  ).run(
+    next.hostname,
+    next.ipAddress,
+    next.enabled ? 1 : 0,
+    next.site,
+    next.type ?? null,
+    next.org,
+    next.assetTag ?? null,
+    next.serialNumber ?? null,
+    now,
+    input.id
+  );
+  return getDeviceById(db, input.id);
+}
+
+export function updateDeviceIdentity(
+  db: DB,
+  input: {
+    id: number;
+    assetTag?: string | null;
+    serialNumber?: string | null;
+  }
+): DeviceRow | null {
+  const existing = getDeviceById(db, input.id);
+  if (!existing) return null;
+  const hasAssetTag = input.assetTag !== undefined;
+  const hasSerialNumber = input.serialNumber !== undefined;
+  if (!hasAssetTag && !hasSerialNumber) return existing;
+
+  const nextAssetTag = hasAssetTag ? input.assetTag ?? null : existing.assetTag ?? null;
+  const nextSerialNumber = hasSerialNumber ? input.serialNumber ?? null : existing.serialNumber ?? null;
+  if (nextAssetTag === existing.assetTag && nextSerialNumber === existing.serialNumber) return existing;
+
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE devices
+     SET asset_tag = ?, serial_number = ?, updated_at = ?
+     WHERE id = ?`
+  ).run(nextAssetTag, nextSerialNumber, now, input.id);
   return getDeviceById(db, input.id);
 }
 
@@ -2545,19 +2652,26 @@ export function getWorkerExecutionSummary(
 
 export function saveSnmpSystemSnapshot(db: DB, input: {
   deviceId: number;
-  system: { sysName?: string | null; sysDescr?: string | null; sysObjectId?: string | null; sysUpTime?: string | null };
+  system: {
+    sysName?: string | null;
+    sysDescr?: string | null;
+    sysObjectId?: string | null;
+    sysUpTime?: string | null;
+    serialNumber?: string | null;
+  };
   collectedAt: string;
 }) {
   const now = new Date().toISOString();
   db.prepare(
-    `INSERT INTO snmp_system_snapshots (device_id, sys_name, sys_descr, sys_object_id, sys_uptime, collected_at, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO snmp_system_snapshots (device_id, sys_name, sys_descr, sys_object_id, sys_uptime, serial_number, collected_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     input.deviceId,
     input.system.sysName ?? null,
     input.system.sysDescr ?? null,
     input.system.sysObjectId ?? null,
     input.system.sysUpTime ?? null,
+    input.system.serialNumber ?? null,
     input.collectedAt,
     now
   );
@@ -2725,7 +2839,8 @@ export function getSystemSnapshotsForDevice(db: DB, deviceId: number) {
   return db
     .prepare(
       `SELECT id, device_id as deviceId, sys_name as sysName, sys_descr as sysDescr, sys_object_id as sysObjectId,
-              sys_uptime as sysUpTime, collected_at as collectedAt, created_at as createdAt
+              sys_uptime as sysUpTime, serial_number as serialNumber,
+              collected_at as collectedAt, created_at as createdAt
        FROM snmp_system_snapshots
        WHERE device_id = ?
        ORDER BY collected_at DESC, id DESC`
@@ -3691,7 +3806,9 @@ export function getPollJobDetail(
          pt.id as targetId, pt.device_id as targetDeviceId, pt.profile_id as targetProfileId, pt.enabled as targetEnabled,
          pt.created_at as targetCreatedAt, pt.updated_at as targetUpdatedAt,
          d.id as deviceId, d.hostname as deviceHostname, d.ip_address as deviceIpAddress, d.enabled as deviceEnabled,
-         d.site as deviceSite, d.type as deviceType, d.org as deviceOrg, d.created_at as deviceCreatedAt, d.updated_at as deviceUpdatedAt,
+         d.site as deviceSite, d.type as deviceType, d.org as deviceOrg,
+         d.asset_tag as deviceAssetTag, d.serial_number as deviceSerialNumber,
+         d.created_at as deviceCreatedAt, d.updated_at as deviceUpdatedAt,
          pp.id as profileId, pp.kind as profileKind, pp.name as profileName, pp.interval_sec as profileIntervalSec,
          pp.timeout_ms as profileTimeoutMs, pp.retries as profileRetries, pp.enabled as profileEnabled,
          pp.config_json as profileConfigJson, pp.created_at as profileCreatedAt, pp.updated_at as profileUpdatedAt
@@ -3728,6 +3845,8 @@ export function getPollJobDetail(
         deviceSite: string | null;
         deviceType: string | null;
         deviceOrg: string | null;
+        deviceAssetTag: string | null;
+        deviceSerialNumber: string | null;
         deviceCreatedAt: string;
         deviceUpdatedAt: string;
         profileId: number;
@@ -3776,6 +3895,8 @@ export function getPollJobDetail(
     site: row.deviceSite ?? null,
     type: row.deviceType ?? null,
     org: row.deviceOrg ?? null,
+    assetTag: row.deviceAssetTag ?? null,
+    serialNumber: row.deviceSerialNumber ?? null,
     createdAt: row.deviceCreatedAt,
     updatedAt: row.deviceUpdatedAt,
   };

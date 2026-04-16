@@ -78,6 +78,8 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
         name: d.hostname,
         ip: d.ipAddress,
         deviceType: d.type ?? undefined,
+        assetTag: d.assetTag ?? null,
+        serialNumber: d.serialNumber ?? null,
         status: d.enabled ? "unknown" : "down",
         snmpProfileId: snmpProfileId !== undefined ? String(snmpProfileId) : null,
         snmpPollerIds: snmpPollerIds.length ? snmpPollerIds.map(String) : null,

@@ -213,3 +213,37 @@ export async function publishAvailabilityUpdate(
     return { ok: false, reason: (code || "network_error") as string };
   }
 }
+
+export async function publishDeviceIdentityUpdate(
+  cfg: AppConfig,
+  input: {
+    deviceId: string;
+    updatedAt: string;
+    assetTag?: string | null;
+    serialNumber?: string | null;
+  },
+): Promise<{ ok: boolean; accepted?: boolean; reason?: string }> {
+  if (!cfg.xmonCollectorId || !cfg.xmonApiKey) return { ok: false, reason: "collector_id_or_api_key_missing" };
+  try {
+    const res = await doFetch(`${cfg.xmonApiBase}/collectors/${encodeURIComponent(cfg.xmonCollectorId)}/session/publish`, {
+      method: "POST",
+      headers: { "x-xmon-api-key": cfg.xmonApiKey },
+      body: JSON.stringify({
+        event: {
+          type: "device_identity_updated",
+          deviceId: input.deviceId,
+          updatedAt: input.updatedAt,
+          assetTag: input.assetTag ?? null,
+          serialNumber: input.serialNumber ?? null,
+        },
+      }),
+    });
+
+    const body = (await res.json().catch(() => ({}))) as { accepted?: boolean; reason?: string };
+    if (!res.ok) return { ok: false, accepted: body?.accepted, reason: body?.reason ?? `http_${res.status}` };
+    return { ok: true, accepted: body?.accepted, reason: body?.reason };
+  } catch (err: any) {
+    const code = (err as any)?.code || (err as any)?.cause?.code;
+    return { ok: false, reason: (code || "network_error") as string };
+  }
+}
