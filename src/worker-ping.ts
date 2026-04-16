@@ -2,7 +2,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
-import { loadConfig } from "./config.js";
+import { loadConfig, type AppConfig } from "./config.js";
 import {
   initDatabase,
   upsertWorkerRegistration,
@@ -19,6 +19,7 @@ import {
   type DB,
 } from "./db.js";
 import { enqueueTelemetry, enqueueDeviceSnapshot, enqueueDeviceState, startTelemetryQueue } from "./telemetry-queue.js";
+import { publishAvailabilityUpdate } from "./xmon-client.js";
 
 type WorkerConfig = {
   workerName: string;
@@ -51,7 +52,7 @@ function log(data: Record<string, any>) {
   );
 }
 
-async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: boolean }) {
+async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: boolean }, resolveCloudCfg: () => AppConfig) {
   let currentJobIds = new Set<number>();
   let heartbeatHandle: NodeJS.Timeout | null = null;
 
@@ -285,6 +286,13 @@ async function runLoop(db: DB, workerCfg: WorkerConfig, shuttingDown: { flag: bo
           ts: resultPayload.processedAt,
           latencyMs: probe?.latencyMs ?? null,
         });
+        void publishAvailabilityUpdate(resolveCloudCfg(), {
+          deviceId: String(detail.device.id),
+          updatedAt: resultPayload.processedAt,
+          revision: `${detail.device.id}:${resultPayload.processedAt}`,
+        }).catch(() => {
+          /* ignore */
+        });
 
         currentJobIds.delete(job.id);
       }
@@ -356,7 +364,17 @@ async function main() {
     shutdown("SIGTERM").catch(() => process.exit(1));
   });
 
-  await runLoop(db, workerCfg, shuttingDown);
+  const resolveCloudCfg = () => {
+    const latest = getAllAppConfig(db);
+    return {
+      ...config,
+      xmonApiBase: latest["XMON_API_BASE"] || config.xmonApiBase,
+      xmonCollectorId: latest["XMON_COLLECTOR_ID"] || config.xmonCollectorId,
+      xmonApiKey: latest["XMON_API_KEY"] || config.xmonApiKey,
+    };
+  };
+
+  await runLoop(db, workerCfg, shuttingDown, resolveCloudCfg);
 }
 
 main().catch((err) => {
