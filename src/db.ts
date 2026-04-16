@@ -776,6 +776,20 @@ function normalizeSnmpSerialValue(value: string | null | undefined): string | nu
   return trimmed;
 }
 
+function normalizeAssetTagValue(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function defaultAssetTagForDevice(deviceId: number) {
+  return `assetTag-${deviceId}`;
+}
+
+function resolveAssetTagForDevice(deviceId: number, assetTag: string | null | undefined) {
+  return normalizeAssetTagValue(assetTag) ?? defaultAssetTagForDevice(deviceId);
+}
+
 type AvailabilityStateValue = "up" | "down" | "unknown";
 
 type AvailabilityStateCurrentRow = {
@@ -908,6 +922,7 @@ export function listDevices(db: DB): DeviceRow[] {
     ...r,
     enabled: Boolean(r.enabled),
     type: r.type ?? null,
+    assetTag: resolveAssetTagForDevice(r.id, r.assetTag),
     serialNumber: normalizeSnmpSerialValue(r.serialNumber),
   }));
 }
@@ -950,6 +965,7 @@ export function findDeviceByIpOrHostname(db: DB, input: { ipAddress?: string; ho
         ...row,
         enabled: Boolean(row.enabled),
         type: row.type ?? null,
+        assetTag: resolveAssetTagForDevice(row.id, row.assetTag),
         serialNumber: normalizeSnmpSerialValue(row.serialNumber),
       }
     : null;
@@ -967,6 +983,7 @@ export function createDevice(db: DB, input: {
 }): DeviceRow {
   const now = new Date().toISOString();
   const enabled = input.enabled ?? true;
+  const normalizedAssetTag = normalizeAssetTagValue(input.assetTag ?? null);
   const normalizedSerial = normalizeSnmpSerialValue(input.serialNumber ?? null);
   const dup = db
     .prepare(`SELECT id FROM devices WHERE ip_address = ? LIMIT 1`)
@@ -987,20 +1004,25 @@ export function createDevice(db: DB, input: {
       input.site ?? null,
       input.type ?? null,
       input.org ?? null,
-      input.assetTag ?? null,
+      normalizedAssetTag,
       normalizedSerial,
       now,
       now
     );
+  const id = Number(result.lastInsertRowid);
+  const finalAssetTag = normalizedAssetTag ?? defaultAssetTagForDevice(id);
+  if (!normalizedAssetTag) {
+    db.prepare(`UPDATE devices SET asset_tag = ?, updated_at = ? WHERE id = ?`).run(finalAssetTag, now, id);
+  }
   return {
-    id: Number(result.lastInsertRowid),
+    id,
     hostname: input.hostname,
     ipAddress: input.ipAddress,
     enabled,
     site: input.site ?? null,
     type: input.type ?? null,
     org: input.org ?? null,
-    assetTag: input.assetTag ?? null,
+    assetTag: finalAssetTag,
     serialNumber: normalizedSerial,
     createdAt: now,
     updatedAt: now,
@@ -1187,24 +1209,29 @@ export function getDevicePollHealth(
     }
     if (typeof value === "object") {
       const obj = value as Record<string, unknown>;
+      if (
+        obj.success === true ||
+        obj.system !== undefined ||
+        obj.discovery !== undefined ||
+        obj.interfacesCount !== undefined ||
+        obj.lldpNeighborsCount !== undefined
+      ) {
+        return null;
+      }
       const preferred = [obj.error, obj.message, obj.reason, obj.summary, obj.details];
       for (const candidate of preferred) {
         const nested = extractReadableError(candidate);
         if (nested) return nested;
       }
-      try {
-        return JSON.stringify(obj);
-      } catch {
-        return null;
-      }
+      return null;
     }
     return null;
   };
 
   const lastPollAt = latest?.finishedAt ?? latest?.startedAt ?? latest?.scheduledAt ?? latest?.createdAt ?? null;
-  const lastErrorObj = parseResult(lastFailureRow?.resultJson ?? latest?.resultJson ?? null);
+  const lastErrorObj = parseResult(lastFailureRow?.resultJson ?? null);
   const lastError = extractReadableError(lastErrorObj);
-  const lastSnmpErrorObj = parseResult(lastSnmpFailureRow?.resultJson ?? latestSnmp?.resultJson ?? null);
+  const lastSnmpErrorObj = parseResult(lastSnmpFailureRow?.resultJson ?? null);
   const lastSnmpError = extractReadableError(lastSnmpErrorObj);
 
   const cloudSyncConfigured = Boolean(cloudCfg?.xmonApiBase && cloudCfg?.xmonCollectorId && cloudCfg?.xmonApiKey);
@@ -1272,6 +1299,7 @@ export function getDeviceById(db: DB, id: number): DeviceRow | null {
     ...row,
     enabled: Boolean(row.enabled),
     type: row.type ?? null,
+    assetTag: resolveAssetTagForDevice(row.id, row.assetTag),
     serialNumber: normalizeSnmpSerialValue(row.serialNumber),
   };
 }
@@ -1300,7 +1328,7 @@ export function updateDevice(
     site: input.site === undefined ? existing.site : input.site,
     org: input.org === undefined ? existing.org : input.org,
     type: input.type === undefined ? existing.type : input.type,
-    assetTag: input.assetTag === undefined ? existing.assetTag : input.assetTag,
+    assetTag: input.assetTag === undefined ? existing.assetTag : normalizeAssetTagValue(input.assetTag),
     serialNumber: input.serialNumber === undefined ? existing.serialNumber : normalizeSnmpSerialValue(input.serialNumber),
   };
   db.prepare(
@@ -1336,7 +1364,7 @@ export function updateDeviceIdentity(
   const hasSerialNumber = input.serialNumber !== undefined;
   if (!hasAssetTag && !hasSerialNumber) return existing;
 
-  const nextAssetTag = hasAssetTag ? input.assetTag ?? null : existing.assetTag ?? null;
+  const nextAssetTag = hasAssetTag ? normalizeAssetTagValue(input.assetTag) : existing.assetTag ?? null;
   const nextSerialNumber = hasSerialNumber ? normalizeSnmpSerialValue(input.serialNumber) : existing.serialNumber ?? null;
   if (nextAssetTag === existing.assetTag && nextSerialNumber === existing.serialNumber) return existing;
 
