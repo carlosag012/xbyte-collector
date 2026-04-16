@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { resolve, join, normalize } from "node:path";
 import os from "node:os";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { runtimeState, setBootstrapState, setCloudState, setRegisteredWorkers } from "./runtime-state.js";
 import { parseNonNegativeInteger } from "./http-utils.js";
@@ -127,6 +128,8 @@ let cloudBridgeStarted = false;
 let dbInitFailed = false;
 let pollSchedulerHandle: NodeJS.Timeout | null = null;
 let stopApplianceSync: (() => void) | null = null;
+const serverEntrypoint = fileURLToPath(import.meta.url);
+const runningFromDist = serverEntrypoint.includes(`${resolve("dist", "src")}`);
 
 function resolveXmonConfig(db: DB, overrides?: { apiBase?: string; collectorId?: string; apiKey?: string }) {
   const saved = getAllAppConfig(db);
@@ -1573,6 +1576,8 @@ const server = createServer((req, res) => {
         uptimeSeconds: Math.round(process.uptime()),
         cwd: process.cwd(),
         sqlitePath: config.sqlitePath,
+        entrypoint: serverEntrypoint,
+        runningFromDist,
         version: versionInfo,
       };
       res.writeHead(200);

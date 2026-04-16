@@ -1,0 +1,18 @@
+[Unit]
+Description=xbyte-collector workers supervisor
+After=network.target xbyte-collector.service
+Wants=xbyte-collector.service
+
+[Service]
+Type=simple
+User=__SERVICE_USER__
+Group=__SERVICE_GROUP__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__ENV_FILE__
+ExecStart=/usr/bin/node __APP_DIR__/dist/src/workers-supervisor.js
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
