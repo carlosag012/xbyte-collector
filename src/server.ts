@@ -786,6 +786,43 @@ const server = createServer((req, res) => {
     return;
   }
 
+  if (method === "GET") {
+    try {
+      const parsedUrl = new URL(req.url ?? "/", "http://localhost");
+      const match = parsedUrl.pathname.match(/^\/api\/devices\/(\d+)\/?$/);
+      if (!match) {
+        // not a device detail path handled here; continue route matching
+      } else {
+        if (!db) throw new Error("db missing");
+        const id = Number.parseInt(match[1], 10);
+        if (!Number.isInteger(id) || id <= 0) {
+          res.writeHead(400);
+          res.end(JSON.stringify({ ok: false, error: "invalid_device_id" }));
+          return;
+        }
+        const device = getDeviceById(db, id);
+        if (!device) {
+          res.writeHead(404);
+          res.end(JSON.stringify({ ok: false, error: "not_found" }));
+          return;
+        }
+        const cfg = getAllAppConfig(db);
+        const pollHealth = getDevicePollHealth(db, id, {
+          xmonApiBase: cfg["XMON_API_BASE"] ?? cfg["XMON_API_BASE_URL"] ?? null,
+          xmonCollectorId: cfg["XMON_COLLECTOR_ID"] ?? null,
+          xmonApiKey: cfg["XMON_API_KEY"] ?? null,
+        });
+        res.writeHead(200);
+        res.end(JSON.stringify({ ok: true, device: { ...device, pollHealth } }));
+        return;
+      }
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+      return;
+    }
+  }
+
   if (method === "POST" && url === "/api/devices") {
     readJsonBody<any>(req)
       .then((body) => {

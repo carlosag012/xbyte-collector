@@ -377,6 +377,38 @@ export function initDatabase(config: AppConfig): DB {
     // ignore if it already exists
   }
 
+  // Normalize known SNMP error placeholder strings so identity fields remain trustworthy.
+  try {
+    db.prepare(
+      `UPDATE devices
+       SET serial_number = NULL
+       WHERE serial_number IS NOT NULL
+         AND (
+           LOWER(serial_number) LIKE '%no such object%'
+           OR LOWER(serial_number) LIKE '%no such instance%'
+           OR LOWER(serial_number) LIKE '%unknown object identifier%'
+           OR TRIM(serial_number) = ''
+         )`
+    ).run();
+  } catch {
+    // ignore cleanup errors on older schema states
+  }
+  try {
+    db.prepare(
+      `UPDATE snmp_system_snapshots
+       SET serial_number = NULL
+       WHERE serial_number IS NOT NULL
+         AND (
+           LOWER(serial_number) LIKE '%no such object%'
+           OR LOWER(serial_number) LIKE '%no such instance%'
+           OR LOWER(serial_number) LIKE '%unknown object identifier%'
+           OR TRIM(serial_number) = ''
+         )`
+    ).run();
+  } catch {
+    // ignore cleanup errors on older schema states
+  }
+
   try {
     db.prepare(`ALTER TABLE interface_snapshots ADD COLUMN bps_in REAL`).run();
   } catch {}
@@ -733,6 +765,17 @@ export type DevicePollHealth = {
   cloudSyncConfigured: boolean;
 };
 
+function normalizeSnmpSerialValue(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower.includes("no such object") || lower.includes("no such instance") || lower.includes("unknown object identifier")) {
+    return null;
+  }
+  return trimmed;
+}
+
 type AvailabilityStateValue = "up" | "down" | "unknown";
 
 type AvailabilityStateCurrentRow = {
@@ -861,7 +904,12 @@ export function listDevices(db: DB): DeviceRow[] {
     createdAt: string;
     updatedAt: string;
   }>;
-  return rows.map((r) => ({ ...r, enabled: Boolean(r.enabled), type: r.type ?? null }));
+  return rows.map((r) => ({
+    ...r,
+    enabled: Boolean(r.enabled),
+    type: r.type ?? null,
+    serialNumber: normalizeSnmpSerialValue(r.serialNumber),
+  }));
 }
 
 export function findDeviceByIpOrHostname(db: DB, input: { ipAddress?: string; hostname?: string }): DeviceRow | null {
@@ -897,7 +945,14 @@ export function findDeviceByIpOrHostname(db: DB, input: { ipAddress?: string; ho
         updatedAt: string;
       }
     | undefined;
-  return row ? { ...row, enabled: Boolean(row.enabled), type: row.type ?? null } : null;
+  return row
+    ? {
+        ...row,
+        enabled: Boolean(row.enabled),
+        type: row.type ?? null,
+        serialNumber: normalizeSnmpSerialValue(row.serialNumber),
+      }
+    : null;
 }
 
 export function createDevice(db: DB, input: {
@@ -912,6 +967,7 @@ export function createDevice(db: DB, input: {
 }): DeviceRow {
   const now = new Date().toISOString();
   const enabled = input.enabled ?? true;
+  const normalizedSerial = normalizeSnmpSerialValue(input.serialNumber ?? null);
   const dup = db
     .prepare(`SELECT id FROM devices WHERE ip_address = ? LIMIT 1`)
     .get(input.ipAddress) as { id: number } | undefined;
@@ -932,7 +988,7 @@ export function createDevice(db: DB, input: {
       input.type ?? null,
       input.org ?? null,
       input.assetTag ?? null,
-      input.serialNumber ?? null,
+      normalizedSerial,
       now,
       now
     );
@@ -945,7 +1001,7 @@ export function createDevice(db: DB, input: {
     type: input.type ?? null,
     org: input.org ?? null,
     assetTag: input.assetTag ?? null,
-    serialNumber: input.serialNumber ?? null,
+    serialNumber: normalizedSerial,
     createdAt: now,
     updatedAt: now,
   };
@@ -1115,16 +1171,41 @@ export function getDevicePollHealth(
     }
   };
 
+  const extractReadableError = (value: unknown): string | null => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === "string") {
+      const trimmed = value.trim();
+      return trimmed || null;
+    }
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+    if (Array.isArray(value)) {
+      for (const item of value) {
+        const nested = extractReadableError(item);
+        if (nested) return nested;
+      }
+      return null;
+    }
+    if (typeof value === "object") {
+      const obj = value as Record<string, unknown>;
+      const preferred = [obj.error, obj.message, obj.reason, obj.summary, obj.details];
+      for (const candidate of preferred) {
+        const nested = extractReadableError(candidate);
+        if (nested) return nested;
+      }
+      try {
+        return JSON.stringify(obj);
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  };
+
   const lastPollAt = latest?.finishedAt ?? latest?.startedAt ?? latest?.scheduledAt ?? latest?.createdAt ?? null;
   const lastErrorObj = parseResult(lastFailureRow?.resultJson ?? latest?.resultJson ?? null);
-  const lastError =
-    lastErrorObj?.error || lastErrorObj?.message || lastErrorObj?.summary || (typeof lastErrorObj === "string" ? lastErrorObj : null);
+  const lastError = extractReadableError(lastErrorObj);
   const lastSnmpErrorObj = parseResult(lastSnmpFailureRow?.resultJson ?? latestSnmp?.resultJson ?? null);
-  const lastSnmpError =
-    lastSnmpErrorObj?.error ||
-    lastSnmpErrorObj?.message ||
-    lastSnmpErrorObj?.summary ||
-    (typeof lastSnmpErrorObj === "string" ? lastSnmpErrorObj : null);
+  const lastSnmpError = extractReadableError(lastSnmpErrorObj);
 
   const cloudSyncConfigured = Boolean(cloudCfg?.xmonApiBase && cloudCfg?.xmonCollectorId && cloudCfg?.xmonApiKey);
 
@@ -1187,7 +1268,12 @@ export function getDeviceById(db: DB, id: number): DeviceRow | null {
       }
     | undefined;
   if (!row) return null;
-  return { ...row, enabled: Boolean(row.enabled), type: row.type ?? null };
+  return {
+    ...row,
+    enabled: Boolean(row.enabled),
+    type: row.type ?? null,
+    serialNumber: normalizeSnmpSerialValue(row.serialNumber),
+  };
 }
 
 export function updateDevice(
@@ -1215,7 +1301,7 @@ export function updateDevice(
     org: input.org === undefined ? existing.org : input.org,
     type: input.type === undefined ? existing.type : input.type,
     assetTag: input.assetTag === undefined ? existing.assetTag : input.assetTag,
-    serialNumber: input.serialNumber === undefined ? existing.serialNumber : input.serialNumber,
+    serialNumber: input.serialNumber === undefined ? existing.serialNumber : normalizeSnmpSerialValue(input.serialNumber),
   };
   db.prepare(
     `UPDATE devices
@@ -1251,7 +1337,7 @@ export function updateDeviceIdentity(
   if (!hasAssetTag && !hasSerialNumber) return existing;
 
   const nextAssetTag = hasAssetTag ? input.assetTag ?? null : existing.assetTag ?? null;
-  const nextSerialNumber = hasSerialNumber ? input.serialNumber ?? null : existing.serialNumber ?? null;
+  const nextSerialNumber = hasSerialNumber ? normalizeSnmpSerialValue(input.serialNumber) : existing.serialNumber ?? null;
   if (nextAssetTag === existing.assetTag && nextSerialNumber === existing.serialNumber) return existing;
 
   const now = new Date().toISOString();

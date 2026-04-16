@@ -647,7 +647,17 @@ function parseSnmpSerial(stdout: string): string | null {
     const value = snmpValueToString(restRaw).trim();
     if (!value) continue;
     const lower = value.toLowerCase();
-    if (lower === "unknown" || lower === "none" || lower === "n/a" || lower === "not set") continue;
+    if (
+      lower === "unknown" ||
+      lower === "none" ||
+      lower === "n/a" ||
+      lower === "not set" ||
+      lower.includes("no such object") ||
+      lower.includes("no such instance") ||
+      lower.includes("unknown object identifier")
+    ) {
+      continue;
+    }
     return value;
   }
   return null;
@@ -866,16 +876,24 @@ function parseSysUptimeValue(raw: unknown): number | null {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function normalizeCollectedSerialValue(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  const lower = trimmed.toLowerCase();
+  if (lower.includes("no such object") || lower.includes("no such instance") || lower.includes("unknown object identifier")) {
+    return null;
+  }
+  return trimmed;
+}
+
 function persistDiscoveryNormalization(
   db: DB,
   deviceId: number,
   discovery: { system: any; interfaces: any[]; lldpNeighbors: any[] },
   collectedAt: string
 ): { assetTag: string | null; serialNumber: string | null } | null {
-  const normalizedSerial =
-    typeof discovery?.system?.serialNumber === "string" && discovery.system.serialNumber.trim()
-      ? discovery.system.serialNumber.trim()
-      : null;
+  const normalizedSerial = normalizeCollectedSerialValue(discovery?.system?.serialNumber);
   saveSnmpSystemSnapshot(db, {
     deviceId,
     system: {

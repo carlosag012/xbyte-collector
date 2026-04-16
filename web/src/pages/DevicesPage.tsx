@@ -9,7 +9,7 @@ type DevicePollHealth = {
   lastFailureAt: string | null;
   successCount: number;
   failureCount: number;
-  lastError: string | null;
+  lastError: unknown | null;
   activeSnmpProfile: string | null;
   activeSnmpPollerId: string | null;
   hasSnmpBinding: boolean;
@@ -17,7 +17,7 @@ type DevicePollHealth = {
   lastSnmpPollAt: string | null;
   lastSnmpSuccessAt: string | null;
   lastSnmpFailureAt: string | null;
-  lastSnmpError: string | null;
+  lastSnmpError: unknown | null;
   lastPingSuccessAt: string | null;
   lastPingFailureAt: string | null;
   cloudSyncConfigured: boolean;
@@ -28,6 +28,8 @@ type Device = {
   hostname: string;
   ipAddress: string;
   enabled: boolean;
+  assetTag?: string | null;
+  serialNumber?: string | null;
   type?: string | null;
   site?: string | null;
   org?: string | null;
@@ -67,9 +69,29 @@ function getOnboardingNextAction(health?: DevicePollHealth) {
   if (!health?.hasSnmpBinding) return "Add an SNMP polling binding to collect interfaces.";
   if (!health?.hasPingBinding) return "Add a ping polling binding for reachability.";
   if (!health?.cloudSyncConfigured) return "Configure cloud sync in Licensing to send data upstream.";
-  if (hasActiveSnmpError(health)) return `Last SNMP attempt failed: ${health?.lastSnmpError ?? "check credentials/timeouts."}`;
+  if (hasActiveSnmpError(health)) {
+    const reason = normalizeErrorValue(health?.lastSnmpError).text;
+    return `Last SNMP attempt failed: ${reason === "—" ? "check credentials/timeouts." : reason}`;
+  }
   if (!health?.lastSnmpSuccessAt) return "Polling binding is active; waiting for first SNMP success.";
   return `SNMP healthy. Last success: ${health.lastSnmpSuccessAt}`;
+}
+
+function normalizeErrorValue(value: unknown): { text: string; raw?: string } {
+  if (value == null) return { text: "—" };
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return { text: trimmed || "—" };
+  }
+  if (typeof value === "number" || typeof value === "boolean") {
+    return { text: String(value) };
+  }
+  try {
+    const raw = JSON.stringify(value, null, 2);
+    return { text: "Structured error", raw };
+  } catch {
+    return { text: String(value) };
+  }
 }
 
 export default function DevicesPage() {
@@ -78,7 +100,7 @@ export default function DevicesPage() {
   const [targets, setTargets] = useState<Target[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [search, setSearch] = useState("");
-  const [form, setForm] = useState({ hostname: "", ipAddress: "", site: "", org: "", type: "" });
+  const [form, setForm] = useState({ hostname: "", ipAddress: "", site: "", org: "", type: "", assetTag: "" });
   const [editing, setEditing] = useState<Device | null>(null);
   const [snapshot, setSnapshot] = useState<SystemSnapshot | null>(null);
   const [interfaces, setInterfaces] = useState<InterfaceRow[]>([]);
@@ -90,6 +112,8 @@ export default function DevicesPage() {
   const [promotionNote, setPromotionNote] = useState<string | null>(null);
   const [history, setHistory] = useState<any[]>([]);
   const [historyModal, setHistoryModal] = useState(false);
+  const [showBarcodes, setShowBarcodes] = useState(false);
+  const [detailDevice, setDetailDevice] = useState<Device | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const refreshInFlight = useRef(false);
   const toast = useToast();
@@ -178,6 +202,7 @@ export default function DevicesPage() {
       site: form.site || undefined,
       org: form.org || undefined,
       type: form.type || undefined,
+      assetTag: form.assetTag.trim() ? form.assetTag.trim() : null,
       enabled: true,
     };
     let url = "/api/devices";
@@ -194,14 +219,21 @@ export default function DevicesPage() {
     });
     if (res.ok) {
       await loadDevices();
-      setForm({ hostname: "", ipAddress: "", site: "", org: "", type: "" });
+      setForm({ hostname: "", ipAddress: "", site: "", org: "", type: "", assetTag: "" });
       setEditing(null);
     }
   }
 
   function startEdit(d: Device) {
     setEditing(d);
-    setForm({ hostname: d.hostname, ipAddress: d.ipAddress, site: d.site ?? "", org: d.org ?? "", type: d.type ?? "" });
+    setForm({
+      hostname: d.hostname,
+      ipAddress: d.ipAddress,
+      site: d.site ?? "",
+      org: d.org ?? "",
+      type: d.type ?? "",
+      assetTag: d.assetTag ?? "",
+    });
   }
 
   async function toggleEnabled(d: Device) {
@@ -215,7 +247,8 @@ export default function DevicesPage() {
   }
 
   async function loadDeviceDetail(id: number) {
-    const [sysRes, ifRes, neighRes, targRes, revRes, histRes] = await Promise.all([
+    const [deviceRes, sysRes, ifRes, neighRes, targRes, revRes, histRes] = await Promise.all([
+      fetch(`/api/devices/${id}`, { credentials: "include" }),
       fetch(`/api/tdt/system-snapshots?deviceId=${id}`, { credentials: "include" }),
       fetch(`/api/tdt/interfaces?deviceId=${id}`, { credentials: "include" }),
       fetch(`/api/tdt/lldp-neighbors?deviceId=${id}`, { credentials: "include" }),
@@ -223,6 +256,12 @@ export default function DevicesPage() {
       fetch(`/api/neighbors?deviceId=${id}`, { credentials: "include" }),
       fetch(`/api/neighbors/history?deviceId=${id}`, { credentials: "include" }),
     ]);
+    if (deviceRes.ok) {
+      const d = await deviceRes.json();
+      setDetailDevice(d?.device ?? null);
+    } else {
+      setDetailDevice((prev) => (prev?.id === id ? prev : null));
+    }
     if (sysRes.ok) {
       const d = await sysRes.json();
       setSnapshot(d.snapshots?.[0] ?? null);
@@ -257,6 +296,7 @@ export default function DevicesPage() {
 
   async function selectDevice(id: number) {
     setSelected(id);
+    setShowBarcodes(false);
     await loadDeviceDetail(id);
     const firstProfile = profiles.find((p) => p.enabled);
     setAttachProfileId(firstProfile ? firstProfile.id : null);
@@ -307,8 +347,6 @@ export default function DevicesPage() {
       body: JSON.stringify({ targetId: enqueueTargetId }),
     });
   }
-
-  const detailDevice = devices.find((d) => d.id === selected) || null;
 
   return (
     <div>
@@ -377,6 +415,12 @@ export default function DevicesPage() {
                     <input value={form.org} onChange={(e) => setForm({ ...form, org: e.target.value })} />
                   </label>
                 </div>
+                <div className="form-col">
+                  <label>
+                    <span>Asset Tag</span>
+                    <input value={form.assetTag} onChange={(e) => setForm({ ...form, assetTag: e.target.value })} placeholder="Optional inventory tag" />
+                  </label>
+                </div>
               </div>
               <div className="form-actions" style={{ display: "flex", gap: 8, flexDirection: "column", maxWidth: 420 }}>
                 <button type="submit" className="btn-collector">
@@ -413,6 +457,8 @@ export default function DevicesPage() {
         columns={[
           { key: "hostname", header: "Hostname" },
           { key: "ipAddress", header: "IP" },
+          { key: "assetTag", header: "Asset Tag", render: (d: Device) => d.assetTag || "—", minWidth: 140 },
+          { key: "serialNumber", header: "Serial Number", render: (d: Device) => d.serialNumber || "—", minWidth: 160 },
           { key: "enabled", header: "Status", render: (d: Device) => <Pill status={d.enabled ? "enabled" : "disabled"} /> },
           {
             key: "poll-status",
@@ -447,7 +493,7 @@ export default function DevicesPage() {
           {
             key: "last-error",
             header: "Last Error",
-            render: (d: Device) => (d.pollHealth?.lastError ? String(d.pollHealth.lastError).slice(0, 80) : "—"),
+            render: (d: Device) => normalizeErrorValue(d.pollHealth?.lastError).text.slice(0, 80),
             minWidth: 200,
           },
           {
@@ -500,6 +546,13 @@ export default function DevicesPage() {
             <p style={{ margin: 0, color: "var(--muted)" }}>IP: {detailDevice.ipAddress}</p>
             <p style={{ margin: 0, color: "var(--muted)" }}>Site: {detailDevice.site ?? "—"}</p>
             <p style={{ margin: 0, color: "var(--muted)" }}>Org: {detailDevice.org ?? "—"}</p>
+            <p style={{ margin: 0, color: "var(--muted)" }}>Asset Tag: {detailDevice.assetTag ?? "—"}</p>
+            <p style={{ margin: 0, color: "var(--muted)" }}>Serial Number: {detailDevice.serialNumber ?? "—"}</p>
+            <div style={{ marginTop: 8 }}>
+              <button className="btn-secondary" onClick={() => setShowBarcodes(true)} disabled={!detailDevice.assetTag && !detailDevice.serialNumber}>
+                Show Barcodes
+              </button>
+            </div>
             {promotionNote && <p style={{ margin: "6px 0 0 0", color: "#a855f7" }}>{promotionNote}</p>}
             <p style={{ margin: "8px 0 0 0" }}>
               System: {snapshot?.sys_name ?? "—"} | {snapshot?.sys_descr ?? ""} | {snapshot?.sys_object_id ?? ""} | {snapshot?.sys_uptime ?? ""}
@@ -560,10 +613,30 @@ export default function DevicesPage() {
               </div>
               <div style={{ gridColumn: "1 / -1" }}>
                 <div className="muted">Last error</div>
-                <div style={{ color: "#f87171" }}>{detailDevice.pollHealth?.lastError ?? "—"}</div>
-                {detailDevice.pollHealth?.lastSnmpError && (
-                  <div style={{ color: "#f97316", marginTop: 4 }}>SNMP error: {detailDevice.pollHealth.lastSnmpError}</div>
-                )}
+                {(() => {
+                  const normalizedLastError = normalizeErrorValue(detailDevice.pollHealth?.lastError);
+                  const normalizedSnmpError = normalizeErrorValue(detailDevice.pollHealth?.lastSnmpError);
+                  return (
+                    <>
+                      <div style={{ color: "#f87171" }}>{normalizedLastError.text}</div>
+                      {normalizedLastError.raw ? (
+                        <details style={{ marginTop: 4 }}>
+                          <summary>Show raw last error</summary>
+                          <pre style={{ margin: "6px 0 0 0", whiteSpace: "pre-wrap" }}>{normalizedLastError.raw}</pre>
+                        </details>
+                      ) : null}
+                      {detailDevice.pollHealth?.lastSnmpError ? (
+                        <div style={{ color: "#f97316", marginTop: 4 }}>SNMP error: {normalizedSnmpError.text}</div>
+                      ) : null}
+                      {normalizedSnmpError.raw ? (
+                        <details style={{ marginTop: 4 }}>
+                          <summary>Show raw SNMP error</summary>
+                          <pre style={{ margin: "6px 0 0 0", whiteSpace: "pre-wrap" }}>{normalizedSnmpError.raw}</pre>
+                        </details>
+                      ) : null}
+                    </>
+                  );
+                })()}
               </div>
             </div>
             <p style={{ margin: "8px 0 0 0" }}>
@@ -598,7 +671,9 @@ export default function DevicesPage() {
                 </li>
                 <li>Last SNMP success: {detailDevice.pollHealth?.lastSnmpSuccessAt ?? "—"}</li>
                 {hasActiveSnmpError(detailDevice.pollHealth) && (
-                  <li style={{ color: "#f97316" }}>Last SNMP attempt failed: {detailDevice.pollHealth?.lastSnmpError ?? "unknown_error"}</li>
+                  <li style={{ color: "#f97316" }}>
+                    Last SNMP attempt failed: {normalizeErrorValue(detailDevice.pollHealth?.lastSnmpError).text}
+                  </li>
                 )}
               </ul>
               <p style={{ margin: "8px 0 0 0" }}>
@@ -692,6 +767,114 @@ export default function DevicesPage() {
           </ul>
         </Modal>
       )}
+
+      {showBarcodes && detailDevice && (
+        <Modal title={`Identity Barcodes — ${detailDevice.hostname}`} onClose={() => setShowBarcodes(false)}>
+          <div style={{ display: "grid", gap: 14 }}>
+            {detailDevice.assetTag ? <Code39Barcode label="Asset Tag" value={detailDevice.assetTag} /> : null}
+            {detailDevice.serialNumber ? <Code39Barcode label="Serial Number" value={detailDevice.serialNumber} /> : null}
+            {!detailDevice.assetTag && !detailDevice.serialNumber ? <div style={{ color: "var(--muted)" }}>No barcode values available.</div> : null}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
+
+const CODE39_PATTERNS: Record<string, string> = {
+  "0": "nnnwwnwnn",
+  "1": "wnnwnnnnw",
+  "2": "nnwwnnnnw",
+  "3": "wnwwnnnnn",
+  "4": "nnnwwnnnw",
+  "5": "wnnwwnnnn",
+  "6": "nnwwwnnnn",
+  "7": "nnnwnnwnw",
+  "8": "wnnwnnwnn",
+  "9": "nnwwnnwnn",
+  A: "wnnnnwnnw",
+  B: "nnwnnwnnw",
+  C: "wnwnnwnnn",
+  D: "nnnnwwnnw",
+  E: "wnnnwwnnn",
+  F: "nnwnwwnnn",
+  G: "nnnnnwwnw",
+  H: "wnnnnwwnn",
+  I: "nnwnnwwnn",
+  J: "nnnnwwwnn",
+  K: "wnnnnnnww",
+  L: "nnwnnnnww",
+  M: "wnwnnnnwn",
+  N: "nnnnwnnww",
+  O: "wnnnwnnwn",
+  P: "nnwnwnnwn",
+  Q: "nnnnnnwww",
+  R: "wnnnnnwwn",
+  S: "nnwnnnwwn",
+  T: "nnnnwnwwn",
+  U: "wwnnnnnnw",
+  V: "nwwnnnnnw",
+  W: "wwwnnnnnn",
+  X: "nwnnwnnnw",
+  Y: "wwnnwnnnn",
+  Z: "nwwnwnnnn",
+  "-": "nwnnnnwnw",
+  ".": "wwnnnnwnn",
+  " ": "nwwnnnwnn",
+  "*": "nwnnwnwnn",
+  $: "nwnwnwnnn",
+  "/": "nwnwnnnwn",
+  "+": "nwnnnwnwn",
+  "%": "nnnwnwnwn",
+};
+
+function normalizeCode39Value(value: string) {
+  return value.toUpperCase().replace(/[^0-9A-Z .\-$/+%]/g, "");
+}
+
+function buildCode39Bars(value: string) {
+  const encoded = `*${normalizeCode39Value(value)}*`;
+  const bars: Array<{ x: number; width: number }> = [];
+  let x = 0;
+  for (let ci = 0; ci < encoded.length; ci += 1) {
+    const char = encoded[ci];
+    const pattern = CODE39_PATTERNS[char];
+    if (!pattern) continue;
+    for (let i = 0; i < pattern.length; i += 1) {
+      const wide = pattern[i] === "w";
+      const width = wide ? 3 : 1;
+      const isBar = i % 2 === 0;
+      if (isBar) bars.push({ x, width });
+      x += width;
+    }
+    if (ci < encoded.length - 1) x += 1;
+  }
+  return { bars, width: x };
+}
+
+function Code39Barcode({ label, value }: { label: string; value: string }) {
+  const normalized = normalizeCode39Value(value);
+  if (!normalized) {
+    return (
+      <div style={{ border: "1px solid var(--panel-border)", borderRadius: 10, padding: 10 }}>
+        <div style={{ fontWeight: 600 }}>{label}</div>
+        <div style={{ color: "var(--muted)", marginTop: 4 }}>Value cannot be encoded as barcode.</div>
+      </div>
+    );
+  }
+  const { bars, width } = buildCode39Bars(value);
+  const scale = 2;
+  const height = 64;
+  return (
+    <div style={{ border: "1px solid var(--panel-border)", borderRadius: 10, padding: 10 }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>{label}</div>
+      <svg width={Math.max(220, width * scale)} height={height} viewBox={`0 0 ${width} 40`} role="img" aria-label={`${label} barcode`}>
+        <rect x={0} y={0} width={width} height={40} fill="#fff" />
+        {bars.map((bar, idx) => (
+          <rect key={`${bar.x}-${idx}`} x={bar.x} y={0} width={bar.width} height={40} fill="#000" />
+        ))}
+      </svg>
+      <div style={{ marginTop: 6, fontFamily: "monospace" }}>{value}</div>
     </div>
   );
 }
