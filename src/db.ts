@@ -1391,6 +1391,7 @@ const AVAILABILITY_BUCKETS = {
   "1h": 60 * 60 * 1000,
   "1d": 24 * 60 * 60 * 1000,
 } as const;
+const AVAILABILITY_24H_RECENT_RAW_WINDOW_MS = 2 * 60 * 60 * 1000;
 
 function parseAvailabilityTsMs(ts: string | null | undefined) {
   if (!ts) return null;
@@ -2143,11 +2144,44 @@ export function getAvailabilityChart(db: DB, deviceId: number, range: "24h" | "7
   if (range === "24h") {
     const startIso = new Date(nowMs - AVAILABILITY_SUMMARY_WINDOWS["24h"]).toISOString();
     const rows = listAvailabilityRawPointsForDevice(db, deviceId, startIso, nowIso);
-    points = rows.map((row) => ({
-      ts: row.ts,
-      upPct: row.state === "up" ? 100 : 0,
-      state: row.state,
-    }));
+    const recentCutoffMs = nowMs - AVAILABILITY_24H_RECENT_RAW_WINDOW_MS;
+    const olderBuckets = new Map<number, { up: number; down: number }>();
+    const recentRawPoints: Array<{ ts: string; upPct: number; state: string }> = [];
+
+    for (const row of rows) {
+      const rowTsMs = parseAvailabilityTsMs(row.ts);
+      if (rowTsMs == null) continue;
+      if (rowTsMs >= recentCutoffMs) {
+        recentRawPoints.push({
+          ts: row.ts,
+          upPct: row.state === "up" ? 100 : 0,
+          state: row.state,
+        });
+        continue;
+      }
+      if (row.state !== "up" && row.state !== "down") continue;
+      const bucketStartMs = Math.floor(rowTsMs / AVAILABILITY_BUCKETS["5m"]) * AVAILABILITY_BUCKETS["5m"];
+      const entry = olderBuckets.get(bucketStartMs) ?? { up: 0, down: 0 };
+      if (row.state === "up") entry.up += 1;
+      else entry.down += 1;
+      olderBuckets.set(bucketStartMs, entry);
+    }
+
+    const olderBucketPoints = Array.from(olderBuckets.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([bucketStartMs, counts]) => {
+        const known = counts.up + counts.down;
+        if (known <= 0) return null;
+        const upPct = roundAvailabilityPct((counts.up / known) * 100);
+        return {
+          ts: new Date(bucketStartMs).toISOString(),
+          upPct,
+          state: upPct >= 50 ? "up" : "down",
+        };
+      })
+      .filter((row): row is { ts: string; upPct: number; state: string } => row !== null);
+
+    points = [...olderBucketPoints, ...recentRawPoints];
     const knownRows = rows.filter((row) => row.state === "up" || row.state === "down");
     const upCount = knownRows.filter((row) => row.state === "up").length;
     if (knownRows.length > 0) {
