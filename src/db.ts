@@ -127,12 +127,35 @@ export function initDatabase(config: AppConfig): DB {
       PRIMARY KEY(device_id, day),
       FOREIGN KEY(device_id) REFERENCES devices(id)
     );
+    CREATE TABLE IF NOT EXISTS availability_raw_points (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      device_id INTEGER NOT NULL,
+      ts TEXT NOT NULL,
+      state TEXT NOT NULL,
+      latency_ms REAL,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY(device_id) REFERENCES devices(id)
+    );
+    CREATE TABLE IF NOT EXISTS availability_hourly_rollups (
+      device_id INTEGER NOT NULL,
+      hour_start TEXT NOT NULL,
+      up_points INTEGER NOT NULL DEFAULT 0,
+      down_points INTEGER NOT NULL DEFAULT 0,
+      observed_points INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(device_id, hour_start),
+      FOREIGN KEY(device_id) REFERENCES devices(id)
+    );
     CREATE INDEX IF NOT EXISTS idx_availability_transitions_device_ts
       ON availability_transitions(device_id, ts);
     CREATE INDEX IF NOT EXISTS idx_availability_transitions_ts
       ON availability_transitions(ts);
     CREATE INDEX IF NOT EXISTS idx_availability_daily_rollups_device_day
       ON availability_daily_rollups(device_id, day);
+    CREATE INDEX IF NOT EXISTS idx_availability_raw_points_device_ts
+      ON availability_raw_points(device_id, ts);
+    CREATE INDEX IF NOT EXISTS idx_availability_hourly_rollups_device_hour
+      ON availability_hourly_rollups(device_id, hour_start);
     CREATE TABLE IF NOT EXISTS companies (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       company_name TEXT NOT NULL,
@@ -384,6 +407,37 @@ export function initDatabase(config: AppConfig): DB {
   } catch {}
   try {
     db.prepare(`CREATE INDEX IF NOT EXISTS idx_availability_daily_rollups_device_day ON availability_daily_rollups(device_id, day)`).run();
+  } catch {}
+  try {
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS availability_raw_points (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        device_id INTEGER NOT NULL,
+        ts TEXT NOT NULL,
+        state TEXT NOT NULL,
+        latency_ms REAL,
+        created_at TEXT NOT NULL
+      )`
+    );
+  } catch {}
+  try {
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS availability_hourly_rollups (
+        device_id INTEGER NOT NULL,
+        hour_start TEXT NOT NULL,
+        up_points INTEGER NOT NULL DEFAULT 0,
+        down_points INTEGER NOT NULL DEFAULT 0,
+        observed_points INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(device_id, hour_start)
+      )`
+    );
+  } catch {}
+  try {
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_availability_raw_points_device_ts ON availability_raw_points(device_id, ts)`).run();
+  } catch {}
+  try {
+    db.prepare(`CREATE INDEX IF NOT EXISTS idx_availability_hourly_rollups_device_hour ON availability_hourly_rollups(device_id, hour_start)`).run();
   } catch {}
 
   const row = db
@@ -686,6 +740,24 @@ type AvailabilityDailyRollupRow = {
   downMs: number;
   observedMs: number;
   incidentCount: number;
+  updatedAt: string;
+};
+
+type AvailabilityRawPointRow = {
+  id: number;
+  deviceId: number;
+  ts: string;
+  state: AvailabilityStateValue;
+  latencyMs: number | null;
+  createdAt: string;
+};
+
+type AvailabilityHourlyRollupRow = {
+  deviceId: number;
+  hourStart: string;
+  upPoints: number;
+  downPoints: number;
+  observedPoints: number;
   updatedAt: string;
 };
 
@@ -1085,6 +1157,8 @@ export function updateDevice(
 }
 
 const AVAILABILITY_RAW_WINDOW_MS = 24 * 60 * 60 * 1000;
+const AVAILABILITY_HOURLY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const AVAILABILITY_DAILY_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const AVAILABILITY_SUMMARY_WINDOWS = {
   "1h": 60 * 60 * 1000,
   "24h": 24 * 60 * 60 * 1000,
@@ -1132,6 +1206,14 @@ function getAvailabilityUtcDayStartMs(ms: number) {
   return Date.parse(`${dayKey}T00:00:00.000Z`);
 }
 
+function getAvailabilityUtcHourStartMs(ms: number) {
+  return Math.floor(ms / AVAILABILITY_BUCKETS["1h"]) * AVAILABILITY_BUCKETS["1h"];
+}
+
+function getAvailabilityUtcHourKey(ms: number) {
+  return new Date(getAvailabilityUtcHourStartMs(ms)).toISOString();
+}
+
 function listAvailabilityDailyRollupsForDevice(db: DB, deviceId: number, sinceDayIso: string, untilDayIso: string) {
   const rows = db
     .prepare(
@@ -1161,6 +1243,65 @@ function listAvailabilityDailyRollupsForDevice(db: DB, deviceId: number, sinceDa
         incidentCount: Number(row.incidentCount ?? 0),
         updatedAt: row.updatedAt,
       }) satisfies AvailabilityDailyRollupRow
+  );
+}
+
+function listAvailabilityRawPointsForDevice(db: DB, deviceId: number, sinceIso: string, untilIso: string) {
+  const rows = db
+    .prepare(
+      `SELECT id, device_id as deviceId, ts, state, latency_ms as latencyMs, created_at as createdAt
+       FROM availability_raw_points
+       WHERE device_id = ? AND ts >= ? AND ts <= ?
+       ORDER BY ts ASC, id ASC`
+    )
+    .all(deviceId, sinceIso, untilIso) as Array<{
+    id: number;
+    deviceId: number;
+    ts: string;
+    state: string;
+    latencyMs: number | null;
+    createdAt: string;
+  }>;
+  return rows.map(
+    (row) =>
+      ({
+        id: row.id,
+        deviceId: row.deviceId,
+        ts: row.ts,
+        state: normalizeAvailabilityState(row.state),
+        latencyMs: row.latencyMs ?? null,
+        createdAt: row.createdAt,
+      }) satisfies AvailabilityRawPointRow
+  );
+}
+
+function listAvailabilityHourlyRollupsForDevice(db: DB, deviceId: number, sinceHourIso: string, untilHourIso: string) {
+  const rows = db
+    .prepare(
+      `SELECT device_id as deviceId, hour_start as hourStart, up_points as upPoints, down_points as downPoints,
+              observed_points as observedPoints, updated_at as updatedAt
+       FROM availability_hourly_rollups
+       WHERE device_id = ? AND hour_start >= ? AND hour_start <= ?
+       ORDER BY hour_start ASC`
+    )
+    .all(deviceId, sinceHourIso, untilHourIso) as Array<{
+    deviceId: number;
+    hourStart: string;
+    upPoints: number;
+    downPoints: number;
+    observedPoints: number;
+    updatedAt: string;
+  }>;
+  return rows.map(
+    (row) =>
+      ({
+        deviceId: row.deviceId,
+        hourStart: row.hourStart,
+        upPoints: Number(row.upPoints ?? 0),
+        downPoints: Number(row.downPoints ?? 0),
+        observedPoints: Number(row.observedPoints ?? 0),
+        updatedAt: row.updatedAt,
+      }) satisfies AvailabilityHourlyRollupRow
   );
 }
 
@@ -1216,8 +1357,61 @@ function incrementAvailabilityDailyIncident(db: DB, deviceId: number, tsIso: str
   ).run(deviceId, dayKey, now);
 }
 
+function insertAvailabilityRawPoint(
+  db: DB,
+  input: {
+    deviceId: number;
+    ts: string;
+    state: AvailabilityStateValue;
+    latencyMs?: number | null;
+  }
+) {
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO availability_raw_points (device_id, ts, state, latency_ms, created_at)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(input.deviceId, input.ts, input.state, input.latencyMs ?? null, now);
+}
+
+function upsertAvailabilityHourlyRollupPoint(
+  db: DB,
+  input: {
+    deviceId: number;
+    ts: string;
+    state: AvailabilityStateValue;
+  }
+) {
+  const tsMs = parseAvailabilityTsMs(input.ts);
+  if (tsMs == null) return;
+  const hourStart = getAvailabilityUtcHourKey(tsMs);
+  const upPoints = input.state === "up" ? 1 : 0;
+  const downPoints = input.state === "down" ? 1 : 0;
+  const observedPoints = input.state === "unknown" ? 0 : 1;
+  const now = new Date().toISOString();
+  db.prepare(
+    `INSERT INTO availability_hourly_rollups (device_id, hour_start, up_points, down_points, observed_points, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?)
+     ON CONFLICT(device_id, hour_start) DO UPDATE SET
+       up_points = up_points + excluded.up_points,
+       down_points = down_points + excluded.down_points,
+       observed_points = observed_points + excluded.observed_points,
+       updated_at = excluded.updated_at`
+  ).run(input.deviceId, hourStart, upPoints, downPoints, observedPoints, now);
+}
+
 function pruneAvailabilityTransitionsBefore(db: DB, deviceId: number, cutoffIso: string) {
   db.prepare(`DELETE FROM availability_transitions WHERE device_id = ? AND ts < ?`).run(deviceId, cutoffIso);
+}
+
+function pruneAvailabilityRawPointsBefore(db: DB, deviceId: number, cutoffIso: string) {
+  db.prepare(`DELETE FROM availability_raw_points WHERE device_id = ? AND ts < ?`).run(deviceId, cutoffIso);
+}
+
+function pruneAvailabilityHourlyRollupsBefore(db: DB, deviceId: number, cutoffIso: string) {
+  const cutoffMs = parseAvailabilityTsMs(cutoffIso);
+  if (cutoffMs == null) return;
+  const cutoffHour = getAvailabilityUtcHourKey(cutoffMs);
+  db.prepare(`DELETE FROM availability_hourly_rollups WHERE device_id = ? AND hour_start < ?`).run(deviceId, cutoffHour);
 }
 
 function pruneAvailabilityDailyRollupsBefore(db: DB, deviceId: number, cutoffIso: string) {
@@ -1587,6 +1781,18 @@ export function recordAvailabilityPingResult(
       incrementAvailabilityDailyIncident(db, input.deviceId, input.ts);
     }
 
+    insertAvailabilityRawPoint(db, {
+      deviceId: input.deviceId,
+      ts: input.ts,
+      state: input.state,
+      latencyMs: input.latencyMs ?? null,
+    });
+    upsertAvailabilityHourlyRollupPoint(db, {
+      deviceId: input.deviceId,
+      ts: input.ts,
+      state: input.state,
+    });
+
     const nextCurrentDownSince =
       input.state === "down"
         ? current?.currentState === "down"
@@ -1615,7 +1821,9 @@ export function recordAvailabilityPingResult(
 
     if (inputTsMs != null) {
       pruneAvailabilityTransitionsBefore(db, input.deviceId, new Date(inputTsMs - AVAILABILITY_RAW_WINDOW_MS).toISOString());
-      pruneAvailabilityDailyRollupsBefore(db, input.deviceId, new Date(inputTsMs - 30 * 24 * 60 * 60 * 1000).toISOString());
+      pruneAvailabilityRawPointsBefore(db, input.deviceId, new Date(inputTsMs - AVAILABILITY_RAW_WINDOW_MS).toISOString());
+      pruneAvailabilityHourlyRollupsBefore(db, input.deviceId, new Date(inputTsMs - AVAILABILITY_HOURLY_WINDOW_MS).toISOString());
+      pruneAvailabilityDailyRollupsBefore(db, input.deviceId, new Date(inputTsMs - AVAILABILITY_DAILY_WINDOW_MS).toISOString());
     }
   });
 
@@ -1696,51 +1904,115 @@ export function getAvailabilityChart(db: DB, deviceId: number, range: "24h" | "7
   const device = getDeviceById(db, deviceId);
   if (!device) return null;
 
-  const resolutionWindow = {
-    "24h": { rangeMs: AVAILABILITY_SUMMARY_WINDOWS["24h"], bucketMs: AVAILABILITY_BUCKETS["5m"] },
-    "7d": { rangeMs: AVAILABILITY_SUMMARY_WINDOWS["7d"], bucketMs: AVAILABILITY_BUCKETS["1h"] },
-    "30d": { rangeMs: AVAILABILITY_SUMMARY_WINDOWS["30d"], bucketMs: AVAILABILITY_BUCKETS["1d"] },
-  } as const;
-
-  const expected = resolutionWindow[range];
-  if (!expected || expected.bucketMs !== AVAILABILITY_BUCKETS[resolution]) {
+  const validPair =
+    (range === "24h" && resolution === "5m") ||
+    (range === "7d" && resolution === "1h") ||
+    (range === "30d" && resolution === "1d");
+  if (!validPair) {
     return null;
   }
 
   const nowIso = new Date().toISOString();
-  const context = buildAvailabilityHistoryContext(db, deviceId, nowIso);
-  if (!context) {
-    return {
-      deviceId: String(deviceId),
-      range,
-      resolution,
-      source: "collector",
-      cached: false,
-      generatedAt: nowIso,
-      points: [],
-      summary: { overallPct: null, downtimeSeconds: null, incidentCount: null },
-    };
-  }
+  const nowMs = Date.parse(nowIso);
+  if (!Number.isFinite(nowMs)) return null;
 
-  const startMs = context.nowMs - expected.rangeMs;
-  const totals = getAvailabilityWindowTotals(db, deviceId, startMs, context.nowMs, context);
-  const summary = summarizeAvailabilityTotals(totals);
-  if (totals.upMs + totals.downMs <= 0) {
-    return {
-      deviceId: String(deviceId),
-      range,
-      resolution,
-      source: "collector",
-      cached: false,
-      generatedAt: nowIso,
-      points: [],
-      summary,
-    };
+  let points: Array<{ ts: string; upPct: number; state: string }> = [];
+  let summary: AvailabilityWindowStats = { overallPct: null, downtimeSeconds: null, incidentCount: null };
+
+  if (range === "24h") {
+    const startIso = new Date(nowMs - AVAILABILITY_SUMMARY_WINDOWS["24h"]).toISOString();
+    const rows = listAvailabilityRawPointsForDevice(db, deviceId, startIso, nowIso);
+    points = rows.map((row) => ({
+      ts: row.ts,
+      upPct: row.state === "up" ? 100 : 0,
+      state: row.state,
+    }));
+    const knownRows = rows.filter((row) => row.state === "up" || row.state === "down");
+    const upCount = knownRows.filter((row) => row.state === "up").length;
+    if (knownRows.length > 0) {
+      summary = {
+        overallPct: roundAvailabilityPct((upCount / knownRows.length) * 100),
+        downtimeSeconds: null,
+        incidentCount: null,
+      };
+    }
+  } else if (range === "7d") {
+    const bucketMs = AVAILABILITY_BUCKETS["1h"];
+    const endHourStartMs = getAvailabilityUtcHourStartMs(nowMs);
+    const startHourStartMs = endHourStartMs - (7 * 24 - 1) * bucketMs;
+    const rows = listAvailabilityHourlyRollupsForDevice(
+      db,
+      deviceId,
+      new Date(startHourStartMs).toISOString(),
+      new Date(endHourStartMs).toISOString()
+    );
+    points = rows
+      .map((row) => {
+        const knownPoints = row.upPoints + row.downPoints;
+        if (knownPoints <= 0) return null;
+        const upPct = roundAvailabilityPct((row.upPoints / knownPoints) * 100);
+        return {
+          ts: row.hourStart,
+          upPct,
+          state: upPct >= 50 ? "up" : "down",
+        };
+      })
+      .filter((row): row is { ts: string; upPct: number; state: string } => row !== null);
+    const totals = rows.reduce(
+      (acc, row) => {
+        acc.up += row.upPoints;
+        acc.known += row.upPoints + row.downPoints;
+        return acc;
+      },
+      { up: 0, known: 0 }
+    );
+    if (totals.known > 0) {
+      summary = {
+        overallPct: roundAvailabilityPct((totals.up / totals.known) * 100),
+        downtimeSeconds: null,
+        incidentCount: null,
+      };
+    }
+  } else {
+    const bucketMs = AVAILABILITY_BUCKETS["1d"];
+    const endDayStartMs = getAvailabilityUtcDayStartMs(nowMs);
+    const startDayStartMs = endDayStartMs - (30 - 1) * bucketMs;
+    const rows = listAvailabilityDailyRollupsForDevice(
+      db,
+      deviceId,
+      new Date(startDayStartMs).toISOString().slice(0, 10),
+      new Date(endDayStartMs).toISOString().slice(0, 10)
+    );
+    points = rows
+      .map((row) => {
+        const knownMs = row.upMs + row.downMs;
+        if (knownMs <= 0) return null;
+        const upPct = roundAvailabilityPct((row.upMs / knownMs) * 100);
+        return {
+          ts: `${row.day}T00:00:00.000Z`,
+          upPct,
+          state: upPct >= 50 ? "up" : "down",
+        };
+      })
+      .filter((row): row is { ts: string; upPct: number; state: string } => row !== null);
+    const totals = rows.reduce(
+      (acc, row) => {
+        acc.upMs += row.upMs;
+        acc.downMs += row.downMs;
+        acc.incidentCount += row.incidentCount;
+        return acc;
+      },
+      { upMs: 0, downMs: 0, incidentCount: 0 }
+    );
+    const knownMs = totals.upMs + totals.downMs;
+    if (knownMs > 0) {
+      summary = {
+        overallPct: roundAvailabilityPct((totals.upMs / knownMs) * 100),
+        downtimeSeconds: Math.round(totals.downMs / 1000),
+        incidentCount: totals.incidentCount,
+      };
+    }
   }
-  const points =
-    range === "24h"
-      ? buildAvailabilityBucketPoints(buildAvailabilitySegments(context, startMs, context.nowMs), startMs, context.nowMs, expected.bucketMs)
-      : buildAvailabilityBucketPointsWithRollups(db, deviceId, startMs, context.nowMs, expected.bucketMs, context);
 
   return {
     deviceId: String(deviceId),
@@ -1793,6 +2065,13 @@ export function listPollProfiles(db: DB): PollProfileRow[] {
   }));
 }
 
+function normalizePollProfileIntervalSec(kind: string, intervalSec: number) {
+  if (String(kind ?? "").trim().toLowerCase() === "ping") {
+    return Math.max(120, Math.trunc(intervalSec));
+  }
+  return intervalSec;
+}
+
 export function createPollProfile(db: DB, input: {
   kind: string;
   name: string;
@@ -1804,18 +2083,19 @@ export function createPollProfile(db: DB, input: {
 }): PollProfileRow {
   const now = new Date().toISOString();
   const enabled = input.enabled ?? true;
+  const intervalSec = normalizePollProfileIntervalSec(input.kind, input.intervalSec);
   const configJson = JSON.stringify(input.config ?? {});
   const result = db
     .prepare(
       `INSERT INTO poll_profiles (kind, name, interval_sec, timeout_ms, retries, enabled, config_json, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(input.kind, input.name, input.intervalSec, input.timeoutMs, input.retries, enabled ? 1 : 0, configJson, now, now);
+    .run(input.kind, input.name, intervalSec, input.timeoutMs, input.retries, enabled ? 1 : 0, configJson, now, now);
   return {
     id: Number(result.lastInsertRowid),
     kind: input.kind,
     name: input.name,
-    intervalSec: input.intervalSec,
+    intervalSec,
     timeoutMs: input.timeoutMs,
     retries: input.retries,
     enabled,
@@ -1902,7 +2182,7 @@ export function updatePollProfile(
   const now = new Date().toISOString();
   const next = {
     name: input.name ?? existing.name,
-    intervalSec: input.intervalSec ?? existing.intervalSec,
+    intervalSec: normalizePollProfileIntervalSec(existing.kind, input.intervalSec ?? existing.intervalSec),
     timeoutMs: input.timeoutMs ?? existing.timeoutMs,
     retries: input.retries ?? existing.retries,
     enabled: input.enabled ?? existing.enabled,
