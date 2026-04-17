@@ -1,4 +1,11 @@
-export const XMON_RPC_METHODS = ["session.ping", "history-summary.query", "availability.query", "sla-history.query"] as const;
+export const XMON_RPC_METHODS = [
+  "session.ping",
+  "history-summary.query",
+  "availability.query",
+  "sla-history.query",
+  "snmp-card.query",
+  "snmp-config.apply",
+] as const;
 
 export type XmonRpcMethod = (typeof XMON_RPC_METHODS)[number];
 

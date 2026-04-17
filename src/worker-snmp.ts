@@ -47,6 +47,77 @@ type WorkerConfig = {
   snmpGetPath: string;
 };
 
+type SnmpWalkFailure = {
+  phase: "interfaces" | "lldp";
+  oid: string;
+  reason: string;
+};
+
+type InterfacesWalkOutcome = {
+  interfaces: any[];
+  attemptedOids: string[];
+  successfulOids: string[];
+  failures: SnmpWalkFailure[];
+};
+
+type LldpWalkOutcome = {
+  neighbors: any[];
+  attemptedOids: string[];
+  successfulOids: string[];
+  successfulKeys: string[];
+  failures: SnmpWalkFailure[];
+};
+
+type SnmpCollectionDiagnostics = {
+  degraded: boolean;
+  interfaces: {
+    attemptedOids: string[];
+    successfulOids: string[];
+    failedOids: string[];
+    failures: SnmpWalkFailure[];
+    replaceAllowed: boolean;
+  };
+  lldp: {
+    attemptedOids: string[];
+    successfulOids: string[];
+    failedOids: string[];
+    failures: SnmpWalkFailure[];
+    replaceAllowed: boolean;
+  };
+};
+
+type SnmpPersistenceInfo = {
+  interfaces: {
+    replaceApplied: boolean;
+    preservedPreviousState: boolean;
+    collectedCount: number;
+  };
+  lldp: {
+    replaceApplied: boolean;
+    preservedPreviousState: boolean;
+    collectedCount: number;
+  };
+};
+
+type SnmpJobResult = {
+  success: boolean;
+  summary: any;
+  discovery: any;
+  error?: string;
+  warnings?: string[];
+  collection?: SnmpCollectionDiagnostics;
+};
+
+type PersistDiscoveryOptions = {
+  allowInterfaceReplace?: boolean;
+  allowLldpReplace?: boolean;
+};
+
+type PersistDiscoveryResult = {
+  identity: { assetTag: string | null; serialNumber: string | null } | null;
+  persistence: SnmpPersistenceInfo;
+};
+
 function buildWorkerConfig(): WorkerConfig {
   const cfg = loadConfig();
   return {
@@ -71,6 +142,11 @@ function log(data: Record<string, any>) {
       ...data,
     })
   );
+}
+
+function compactErrorReason(err: unknown): string {
+  const raw = String((err as any)?.message ?? err ?? "unknown_error");
+  return raw.replace(/\s+/g, " ").trim().slice(0, 280);
 }
 
 async function runLoop(
@@ -267,23 +343,47 @@ async function runLoop(
               });
 
               const res = await processSnmpJob(detail, workerCfg);
-              let status: "completed" | "failed" = res.success ? "completed" : "failed";
               const processedAt = new Date().toISOString();
               let persistedIdentity: { assetTag: string | null; serialNumber: string | null } | null = null;
+              let persistenceInfo: SnmpPersistenceInfo | null = null;
 
-              if (res.success) {
+              if (res.discovery?.system) {
                 try {
-                  persistedIdentity = persistDiscoveryNormalization(db, detail.device.id, res.discovery, processedAt);
+                  const persisted = persistDiscoveryNormalization(db, detail.device.id, res.discovery, processedAt, {
+                    allowInterfaceReplace: res.collection?.interfaces?.replaceAllowed ?? true,
+                    allowLldpReplace: res.collection?.lldp?.replaceAllowed ?? true,
+                  });
+                  persistedIdentity = persisted.identity;
+                  persistenceInfo = persisted.persistence;
                 } catch (err: any) {
-                  // treat as partial warning; keep core success
-                  res.warnings = [...(res.warnings ?? []), err?.message ?? "snmp_persistence_failed"];
-                  res.error = res.error ?? err?.message ?? "snmp_persistence_failed";
+                  const reason = compactErrorReason(err);
+                  res.success = false;
+                  if (res.collection) res.collection.degraded = true;
+                  res.warnings = [...(res.warnings ?? []), `persistence_failed phase=persist reason=${reason}`];
+                  res.error = res.error ? `${res.error}; ${reason}` : reason;
                 }
               }
 
-          finishPollJob(db, {
-            jobId: job.id,
-            status,
+              if (!persistenceInfo) {
+                persistenceInfo = {
+                  interfaces: {
+                    replaceApplied: Boolean(res.collection?.interfaces?.replaceAllowed),
+                    preservedPreviousState: Boolean(res.collection && !res.collection.interfaces.replaceAllowed),
+                    collectedCount: Number(res.summary?.interfacesCount ?? 0),
+                  },
+                  lldp: {
+                    replaceApplied: Boolean(res.collection?.lldp?.replaceAllowed),
+                    preservedPreviousState: Boolean(res.collection && !res.collection.lldp.replaceAllowed),
+                    collectedCount: Number(res.summary?.lldpNeighborsCount ?? 0),
+                  },
+                };
+              }
+
+              const status: "completed" | "failed" = res.success ? "completed" : "failed";
+
+              finishPollJob(db, {
+                jobId: job.id,
+                status,
             result: {
               stub: false,
               workerType: "snmp",
@@ -294,6 +394,8 @@ async function runLoop(
               discovery: res.discovery,
               error: res.error,
               warnings: res.warnings,
+              collection: res.collection,
+              persistence: persistenceInfo,
               context: {
                 jobId: detail.job.id,
                 targetId: detail.target.id,
@@ -474,7 +576,7 @@ main().catch((err) => {
   process.exit(1);
 });
 
-async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<{ success: boolean; summary: any; discovery: any; error?: string; warnings?: string[] }> {
+async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<SnmpJobResult> {
   const target = detail.device.ipAddress;
   const profileConfig = (detail.profile?.config ?? {}) as any;
   const timeoutMs = typeof detail.profile.timeoutMs === "number" ? detail.profile.timeoutMs : 2000;
@@ -487,39 +589,73 @@ async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<{ s
       system.serialNumber = serialNumber;
     }
 
-    // Extended discovery: best-effort so partial failures don't mark device down
-    const errors: string[] = [];
-    let interfaces: any[] = [];
-    let lldpNeighbors: any[] = [];
+    const interfacesOutcome = await snmpWalkInterfaces(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
+    const lldpOutcome = await snmpWalkLldp(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
 
-    try {
-      interfaces = await snmpWalkInterfaces(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
-    } catch (err: any) {
-      errors.push(err?.message ?? "interfaces_walk_failed");
-      interfaces = [];
+    const interfaces = interfacesOutcome.interfaces;
+    const lldpNeighbors = lldpOutcome.neighbors;
+    const interfacesReplaceAllowed = interfacesOutcome.failures.length === 0 || interfaces.length > 0;
+    const lldpHasLocalPortTree = lldpOutcome.successfulKeys.includes("localPort");
+    const lldpHasRemoteIdentityTree = lldpOutcome.successfulKeys.some((k) => k !== "localPort");
+    const lldpReplaceAllowed =
+      lldpOutcome.failures.length === 0 ||
+      lldpNeighbors.length > 0 ||
+      (lldpHasLocalPortTree && lldpHasRemoteIdentityTree);
+    const degraded = !interfacesReplaceAllowed || !lldpReplaceAllowed;
+    const warnings: string[] = [];
+    for (const f of interfacesOutcome.failures) {
+      warnings.push(`walk_failed phase=${f.phase} oid=${f.oid} reason=${f.reason}`);
+    }
+    for (const f of lldpOutcome.failures) {
+      warnings.push(`walk_failed phase=${f.phase} oid=${f.oid} reason=${f.reason}`);
+    }
+    if (!interfacesReplaceAllowed) {
+      const failed = interfacesOutcome.failures.map((f) => f.oid).join(",") || "none";
+      warnings.push(`collection_degraded phase=interfaces action=preserve_previous_state reason=no_usable_data failed_oids=${failed}`);
+    }
+    if (!lldpReplaceAllowed) {
+      const failed = lldpOutcome.failures.map((f) => f.oid).join(",") || "none";
+      warnings.push(`collection_degraded phase=lldp action=preserve_previous_state reason=no_usable_data failed_oids=${failed}`);
     }
 
-    try {
-      lldpNeighbors = await snmpWalkLldp(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
-    } catch (err: any) {
-      errors.push(err?.message ?? "lldp_walk_failed");
-      lldpNeighbors = [];
-    }
+    const interfacesFailed = interfacesOutcome.failures.map((f) => f.oid).join(",") || "none";
+    const lldpFailed = lldpOutcome.failures.map((f) => f.oid).join(",") || "none";
+    const error = degraded
+      ? `material_collection_failure interfaces_replace_allowed=${interfacesReplaceAllowed} lldp_replace_allowed=${lldpReplaceAllowed} interfaces_failed_oids=${interfacesFailed} lldp_failed_oids=${lldpFailed}`
+      : undefined;
 
     return {
-      success: true, // core SNMP reached; treat device as up even if extended walks failed
+      success: !degraded,
       summary: {
         system,
         interfacesCount: interfaces.length,
         lldpNeighborsCount: lldpNeighbors.length,
+        degraded,
       },
       discovery: {
         system,
         interfaces,
         lldpNeighbors,
       },
-      error: errors.length ? errors.join("; ") : undefined,
-      warnings: errors.length ? errors : undefined,
+      error,
+      warnings: warnings.length ? warnings : undefined,
+      collection: {
+        degraded,
+        interfaces: {
+          attemptedOids: interfacesOutcome.attemptedOids,
+          successfulOids: interfacesOutcome.successfulOids,
+          failedOids: interfacesOutcome.failures.map((f) => f.oid),
+          failures: interfacesOutcome.failures,
+          replaceAllowed: interfacesReplaceAllowed,
+        },
+        lldp: {
+          attemptedOids: lldpOutcome.attemptedOids,
+          successfulOids: lldpOutcome.successfulOids,
+          failedOids: lldpOutcome.failures.map((f) => f.oid),
+          failures: lldpOutcome.failures,
+          replaceAllowed: lldpReplaceAllowed,
+        },
+      },
     };
   } catch (err: any) {
     return {
@@ -554,9 +690,9 @@ async function snmpGetSerialNumber(snmpWalkPath: string, target: string, profile
   return parseSnmpSerial(stdout);
 }
 
-async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number) {
+async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number): Promise<InterfacesWalkOutcome> {
   const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
-  const oidList = [
+  const attemptedOids = [
     "1.3.6.1.2.1.31.1.1.1.1",
     "1.3.6.1.2.1.2.2.1.2",
     "1.3.6.1.2.1.31.1.1.1.18",
@@ -573,15 +709,32 @@ async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileC
     "1.3.6.1.2.1.2.2.1.16", // ifOutOctets (fallback)
   ];
   const results: string[] = [];
-  for (const oid of oidList) {
-    const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), oid];
-    const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
-    results.push(stdout);
+  const successfulOids: string[] = [];
+  const failures: SnmpWalkFailure[] = [];
+  for (const oid of attemptedOids) {
+    try {
+      const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), oid];
+      const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
+      results.push(stdout);
+      successfulOids.push(oid);
+    } catch (err) {
+      failures.push({
+        phase: "interfaces",
+        oid,
+        reason: compactErrorReason(err),
+      });
+    }
   }
-  return parseInterfaces(results.join("\n"));
+  const interfaces = results.length ? parseInterfaces(results.join("\n")) : [];
+  return {
+    interfaces,
+    attemptedOids,
+    successfulOids,
+    failures,
+  };
 }
 
-async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number) {
+async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number): Promise<LldpWalkOutcome> {
   const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
   const trees = {
     remoteChassisId: "1.0.8802.1.1.2.1.4.1.1.5",
@@ -591,13 +744,34 @@ async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig:
     remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
     localPort: "1.0.8802.1.1.2.1.3.7.1.3",
   };
+  const attemptedOids = Object.values(trees);
   const outputs: Record<string, string> = {};
+  const successfulOids: string[] = [];
+  const successfulKeys: string[] = [];
+  const failures: SnmpWalkFailure[] = [];
   for (const [key, oid] of Object.entries(trees)) {
-    const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), oid];
-    const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
-    outputs[key] = stdout;
+    try {
+      const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), oid];
+      const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
+      outputs[key] = stdout;
+      successfulOids.push(oid);
+      successfulKeys.push(key);
+    } catch (err) {
+      failures.push({
+        phase: "lldp",
+        oid,
+        reason: compactErrorReason(err),
+      });
+    }
   }
-  return parseLldp(outputs);
+  const neighbors = successfulKeys.length ? parseLldp(outputs) : [];
+  return {
+    neighbors,
+    attemptedOids,
+    successfulOids,
+    successfulKeys,
+    failures,
+  };
 }
 
 function buildSnmpBaseArgs(profileConfig: any, target: string, timeoutSec: number): string[] {
@@ -891,8 +1065,11 @@ function persistDiscoveryNormalization(
   db: DB,
   deviceId: number,
   discovery: { system: any; interfaces: any[]; lldpNeighbors: any[] },
-  collectedAt: string
-): { assetTag: string | null; serialNumber: string | null } | null {
+  collectedAt: string,
+  options: PersistDiscoveryOptions = {}
+): PersistDiscoveryResult {
+  const allowInterfaceReplace = options.allowInterfaceReplace !== false;
+  const allowLldpReplace = options.allowLldpReplace !== false;
   const normalizedSerial = normalizeCollectedSerialValue(discovery?.system?.serialNumber);
   saveSnmpSystemSnapshot(db, {
     deviceId,
@@ -1018,9 +1195,33 @@ function persistDiscoveryNormalization(
     }
   } catch {}
 
-  replaceInterfaceSnapshotsForDevice(db, deviceId, derivedInterfaces ?? [], collectedAt);
-  replaceLldpNeighborsForDevice(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
-  upsertDiscoveredDeviceCandidatesFromLldp(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
+  if (allowInterfaceReplace) {
+    replaceInterfaceSnapshotsForDevice(db, deviceId, derivedInterfaces ?? [], collectedAt);
+  } else {
+    console.error(
+      JSON.stringify({
+        level: "warn",
+        msg: "interface_replace_preserved_previous_state",
+        deviceId,
+        collectedAt,
+        discoveredCount: derivedInterfaces.length,
+      }),
+    );
+  }
+  if (allowLldpReplace) {
+    replaceLldpNeighborsForDevice(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
+    upsertDiscoveredDeviceCandidatesFromLldp(db, deviceId, discovery.lldpNeighbors ?? [], collectedAt);
+  } else {
+    console.error(
+      JSON.stringify({
+        level: "warn",
+        msg: "lldp_replace_preserved_previous_state",
+        deviceId,
+        collectedAt,
+        discoveredCount: discovery.lldpNeighbors?.length ?? 0,
+      }),
+    );
+  }
   try {
     const neighborsRaw = (discovery.lldpNeighbors ?? []).map((n: any) => ({
       localPort: n?.localPort ?? n?.local_port ?? n?.localPortId ?? null,
@@ -1117,9 +1318,24 @@ function persistDiscoveryNormalization(
     // ignore fast flush errors; periodic flush will handle
   }
 
-  if (!updatedIdentity) return null;
   return {
-    assetTag: updatedIdentity.assetTag ?? null,
-    serialNumber: updatedIdentity.serialNumber ?? null,
+    identity: updatedIdentity
+      ? {
+          assetTag: updatedIdentity.assetTag ?? null,
+          serialNumber: updatedIdentity.serialNumber ?? null,
+        }
+      : null,
+    persistence: {
+      interfaces: {
+        replaceApplied: allowInterfaceReplace,
+        preservedPreviousState: !allowInterfaceReplace,
+        collectedCount: derivedInterfaces.length,
+      },
+      lldp: {
+        replaceApplied: allowLldpReplace,
+        preservedPreviousState: !allowLldpReplace,
+        collectedCount: discovery.lldpNeighbors?.length ?? 0,
+      },
+    },
   };
 }
