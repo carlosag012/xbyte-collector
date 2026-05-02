@@ -605,7 +605,13 @@ async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<Snm
     }
 
     const interfacesOutcome = await snmpWalkInterfaces(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
-    const lldpOutcome = await snmpWalkLldp(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
+    const lldpOutcome = await snmpWalkLldp(
+      workerCfg.snmpWalkPath,
+      target,
+      profileConfig,
+      timeoutMs,
+      interfacesOutcome.interfaces,
+    );
     const enableCdp = isProfileFlagEnabled(profileConfig?.enableCdp);
     const cdpOutcome = enableCdp
       ? await snmpWalkCdp(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs, interfacesOutcome.interfaces)
@@ -762,7 +768,13 @@ async function snmpWalkInterfaces(snmpWalkPath: string, target: string, profileC
   };
 }
 
-async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig: any, timeoutMs: number): Promise<LldpWalkOutcome> {
+async function snmpWalkLldp(
+  snmpWalkPath: string,
+  target: string,
+  profileConfig: any,
+  timeoutMs: number,
+  interfaces: any[],
+): Promise<LldpWalkOutcome> {
   const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
   const trees = {
     remoteChassisId: "1.0.8802.1.1.2.1.4.1.1.5",
@@ -793,7 +805,7 @@ async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig:
       });
     }
   }
-  const neighbors = successfulKeys.length ? parseLldp(outputs) : [];
+  const neighbors = successfulKeys.length ? parseLldp(outputs, interfaces) : [];
   return {
     neighbors,
     attemptedOids,
@@ -978,7 +990,7 @@ function parseInterfaces(stdout: string) {
   }));
 }
 
-function parseLldp(outputs: Record<string, string>) {
+function parseLldp(outputs: Record<string, string>, interfaces: any[] = []) {
   const keyToPrefixMap: Record<string, string> = {
     remoteChassisId: "1.0.8802.1.1.2.1.4.1.1.5",
     remotePortId: "1.0.8802.1.1.2.1.4.1.1.7",
@@ -988,6 +1000,50 @@ function parseLldp(outputs: Record<string, string>) {
     remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
     localPort: "1.0.8802.1.1.2.1.3.7.1.3",
   };
+
+  const normalizePortIdentity = (value: unknown): string | null => {
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (!raw) return null;
+    return raw.replace(/\s+/g, "").replace(/["']/g, "");
+  };
+
+  const localPortByNum = new Map<string, string>();
+  {
+    const data = outputs.localPort ?? "";
+    const lines = data.trim().split("\n").filter((l) => l.trim().length);
+    for (const line of lines) {
+      const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
+      if (!oidPart || !rest) continue;
+      const oidFull = normalizeOidNumeric(oidPart);
+      if (!oidFull.startsWith(keyToPrefixMap.localPort + ".")) continue;
+      const suffix = oidFull.slice(keyToPrefixMap.localPort.length + 1);
+      const localPortNum = suffix.split(".")[0]?.trim();
+      if (!localPortNum) continue;
+      const value = snmpValueToString(rest);
+      const cleaned = value?.trim() ?? "";
+      if (!cleaned) continue;
+      localPortByNum.set(localPortNum, cleaned);
+    }
+  }
+
+  const interfaceLabelByIfIndex = new Map<number, string>();
+  const interfaceLabelByNormalizedPort = new Map<string, string>();
+  for (const iface of interfaces ?? []) {
+    const preferredLabel = String(iface?.ifName ?? iface?.ifDescr ?? "").trim() || null;
+    const rawIfIndex = iface?.ifIndex ?? iface?.if_index;
+    const ifIndex = Number(rawIfIndex);
+    if (preferredLabel && Number.isFinite(ifIndex) && !interfaceLabelByIfIndex.has(ifIndex)) {
+      interfaceLabelByIfIndex.set(ifIndex, preferredLabel);
+    }
+    const candidates = [iface?.ifName, iface?.ifDescr];
+    for (const candidate of candidates) {
+      const normalized = normalizePortIdentity(candidate);
+      if (!normalized || !preferredLabel) continue;
+      if (!interfaceLabelByNormalizedPort.has(normalized)) {
+        interfaceLabelByNormalizedPort.set(normalized, preferredLabel);
+      }
+    }
+  }
 
   const remMap = new Map<string, any>();
 
@@ -1000,22 +1056,31 @@ function parseLldp(outputs: Record<string, string>) {
       if (!oidFull.startsWith(prefix + ".")) continue;
       const suffix = oidFull.slice(prefix.length + 1);
       let val: string | null = snmpValueToString(rest);
-      let tuple = suffix.split(".").slice(0, 3).join(".");
+      const suffixParts = suffix.split(".");
+      if (suffixParts.length < 3) continue;
+      const tuple = suffixParts.slice(0, 3).join(".");
+      const localPortNum = suffixParts[1] ?? null;
+      if (!localPortNum) continue;
       if (key === "remoteMgmtIp") {
-        const parts = suffix.split(".");
-        const addrOctets = parts.slice(-4).map((p) => Number(p));
-        if (addrOctets.length === 4 && addrOctets.every((n) => Number.isFinite(n))) {
-          val = addrOctets.join(".");
+        const addrSubtype = Number(suffixParts[3] ?? NaN);
+        const addrLength = Number(suffixParts[4] ?? NaN);
+        if (Number.isFinite(addrSubtype) && Number.isFinite(addrLength) && addrSubtype === 1 && addrLength > 0) {
+          const octets = suffixParts.slice(5, 5 + addrLength).map((p) => Number(p));
+          if (octets.length === addrLength && octets.every((n) => Number.isFinite(n) && n >= 0 && n <= 255)) {
+            val = octets.join(".");
+          } else {
+            val = null;
+          }
         } else {
-          val = null;
+          const addrOctets = suffixParts.slice(-4).map((p) => Number(p));
+          if (addrOctets.length === 4 && addrOctets.every((n) => Number.isFinite(n) && n >= 0 && n <= 255)) {
+            val = addrOctets.join(".");
+          } else {
+            val = null;
+          }
         }
       }
-      if (key === "localPort" && val !== null) {
-        // keep string as-is; tuple for localPort may be shorter, so use tuple of suffix without truncation if needed
-        const locSuffixParts = suffix.split(".");
-        tuple = locSuffixParts.slice(0, 3).join(".");
-      }
-      const rec = sink.get(tuple) ?? {};
+      const rec = sink.get(tuple) ?? { localPortNum };
       if (val !== null) {
         rec[key] = val;
         sink.set(tuple, rec);
@@ -1029,11 +1094,31 @@ function parseLldp(outputs: Record<string, string>) {
 
   const neighbors: any[] = [];
   for (const [, rec] of remMap.entries()) {
-    if (!rec.localPort) continue; // required for ingest
-    if (!rec.remoteSysName && !rec.remotePortId && !rec.remoteChassisId && !rec.remoteMgmtIp) continue;
+    const localPortNum = String(rec.localPortNum ?? "").trim();
+    let localPort =
+      (localPortNum ? localPortByNum.get(localPortNum) ?? null : null) ??
+      null;
+
+    if (!localPort && localPortNum) {
+      const ifIndex = Number(localPortNum);
+      if (Number.isFinite(ifIndex)) {
+        localPort = interfaceLabelByIfIndex.get(ifIndex) ?? null;
+      }
+    }
+
+    if (localPort) {
+      const normalizedLocal = normalizePortIdentity(localPort);
+      if (normalizedLocal) {
+        const reconciled = interfaceLabelByNormalizedPort.get(normalizedLocal);
+        if (reconciled) localPort = reconciled;
+      }
+    }
+
+    if (!localPort) continue;
+    if (!rec.remoteSysName && !rec.remotePortId && !rec.remotePortDesc) continue;
     neighbors.push({
       protocol: "lldp",
-      localPort: rec.localPort ?? null,
+      localPort,
       localIfIndex: null,
       remoteSysName: rec.remoteSysName ?? null,
       remoteSysDesc: rec.remoteSysDesc ?? null,
