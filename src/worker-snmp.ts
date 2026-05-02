@@ -48,7 +48,7 @@ type WorkerConfig = {
 };
 
 type SnmpWalkFailure = {
-  phase: "interfaces" | "lldp";
+  phase: "interfaces" | "lldp" | "cdp";
   oid: string;
   reason: string;
 };
@@ -61,6 +61,14 @@ type InterfacesWalkOutcome = {
 };
 
 type LldpWalkOutcome = {
+  neighbors: any[];
+  attemptedOids: string[];
+  successfulOids: string[];
+  successfulKeys: string[];
+  failures: SnmpWalkFailure[];
+};
+
+type CdpWalkOutcome = {
   neighbors: any[];
   attemptedOids: string[];
   successfulOids: string[];
@@ -147,6 +155,13 @@ function log(data: Record<string, any>) {
 function compactErrorReason(err: unknown): string {
   const raw = String((err as any)?.message ?? err ?? "unknown_error");
   return raw.replace(/\s+/g, " ").trim().slice(0, 280);
+}
+
+function isProfileFlagEnabled(value: unknown): boolean {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return value === 1;
+  if (typeof value === "string") return /^(1|true|yes|on)$/i.test(value.trim());
+  return false;
 }
 
 async function runLoop(
@@ -591,9 +606,15 @@ async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<Snm
 
     const interfacesOutcome = await snmpWalkInterfaces(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
     const lldpOutcome = await snmpWalkLldp(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs);
+    const enableCdp = isProfileFlagEnabled(profileConfig?.enableCdp);
+    const cdpOutcome = enableCdp
+      ? await snmpWalkCdp(workerCfg.snmpWalkPath, target, profileConfig, timeoutMs, interfacesOutcome.interfaces)
+      : null;
 
     const interfaces = interfacesOutcome.interfaces;
     const lldpNeighbors = lldpOutcome.neighbors;
+    const cdpNeighbors = cdpOutcome?.neighbors ?? [];
+    const pathNeighbors = [...lldpNeighbors, ...cdpNeighbors];
     const interfacesReplaceAllowed = interfacesOutcome.failures.length === 0 || interfaces.length > 0;
     const lldpHasLocalPortTree = lldpOutcome.successfulKeys.includes("localPort");
     const lldpHasRemoteIdentityTree = lldpOutcome.successfulKeys.some((k) => k !== "localPort");
@@ -608,6 +629,11 @@ async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<Snm
     }
     for (const f of lldpOutcome.failures) {
       warnings.push(`walk_failed phase=${f.phase} oid=${f.oid} reason=${f.reason}`);
+    }
+    if (cdpOutcome) {
+      for (const f of cdpOutcome.failures) {
+        warnings.push(`walk_failed phase=${f.phase} oid=${f.oid} reason=${f.reason}`);
+      }
     }
     if (!interfacesReplaceAllowed) {
       const failed = interfacesOutcome.failures.map((f) => f.oid).join(",") || "none";
@@ -636,6 +662,8 @@ async function processSnmpJob(detail: any, workerCfg: WorkerConfig): Promise<Snm
         system,
         interfaces,
         lldpNeighbors,
+        cdpNeighbors,
+        pathNeighbors,
       },
       error,
       warnings: warnings.length ? warnings : undefined,
@@ -739,6 +767,7 @@ async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig:
   const trees = {
     remoteChassisId: "1.0.8802.1.1.2.1.4.1.1.5",
     remotePortId: "1.0.8802.1.1.2.1.4.1.1.7",
+    remotePortDesc: "1.0.8802.1.1.2.1.4.1.1.8",
     remoteSysName: "1.0.8802.1.1.2.1.4.1.1.9",
     remoteSysDesc: "1.0.8802.1.1.2.1.4.1.1.10",
     remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
@@ -765,6 +794,53 @@ async function snmpWalkLldp(snmpWalkPath: string, target: string, profileConfig:
     }
   }
   const neighbors = successfulKeys.length ? parseLldp(outputs) : [];
+  return {
+    neighbors,
+    attemptedOids,
+    successfulOids,
+    successfulKeys,
+    failures,
+  };
+}
+
+async function snmpWalkCdp(
+  snmpWalkPath: string,
+  target: string,
+  profileConfig: any,
+  timeoutMs: number,
+  interfaces: any[]
+): Promise<CdpWalkOutcome> {
+  const timeoutSec = Math.max(1, Math.ceil(timeoutMs / 1000));
+  const trees = {
+    localIfIndex: "1.3.6.1.4.1.9.9.23.1.2.1.1.1",
+    remoteAddress: "1.3.6.1.4.1.9.9.23.1.2.1.1.4",
+    remoteVersion: "1.3.6.1.4.1.9.9.23.1.2.1.1.5",
+    remoteDeviceId: "1.3.6.1.4.1.9.9.23.1.2.1.1.6",
+    remotePortId: "1.3.6.1.4.1.9.9.23.1.2.1.1.7",
+    remotePlatform: "1.3.6.1.4.1.9.9.23.1.2.1.1.8",
+    remotePrimaryMgmtAddr: "1.3.6.1.4.1.9.9.23.1.2.1.1.20",
+  };
+  const attemptedOids = Object.values(trees);
+  const outputs: Record<string, string> = {};
+  const successfulOids: string[] = [];
+  const successfulKeys: string[] = [];
+  const failures: SnmpWalkFailure[] = [];
+  for (const [key, oid] of Object.entries(trees)) {
+    try {
+      const args = [...buildSnmpBaseArgs(profileConfig, target, timeoutSec), oid];
+      const { stdout } = await execFileAsync(snmpWalkPath, args, { timeout: timeoutMs + 1500, encoding: "utf8" });
+      outputs[key] = stdout;
+      successfulOids.push(oid);
+      successfulKeys.push(key);
+    } catch (err) {
+      failures.push({
+        phase: "cdp",
+        oid,
+        reason: compactErrorReason(err),
+      });
+    }
+  }
+  const neighbors = successfulKeys.length ? parseCdp(outputs, interfaces) : [];
   return {
     neighbors,
     attemptedOids,
@@ -906,6 +982,7 @@ function parseLldp(outputs: Record<string, string>) {
   const keyToPrefixMap: Record<string, string> = {
     remoteChassisId: "1.0.8802.1.1.2.1.4.1.1.5",
     remotePortId: "1.0.8802.1.1.2.1.4.1.1.7",
+    remotePortDesc: "1.0.8802.1.1.2.1.4.1.1.8",
     remoteSysName: "1.0.8802.1.1.2.1.4.1.1.9",
     remoteSysDesc: "1.0.8802.1.1.2.1.4.1.1.10",
     remoteMgmtIp: "1.0.8802.1.1.2.1.4.2.1.4",
@@ -955,14 +1032,110 @@ function parseLldp(outputs: Record<string, string>) {
     if (!rec.localPort) continue; // required for ingest
     if (!rec.remoteSysName && !rec.remotePortId && !rec.remoteChassisId && !rec.remoteMgmtIp) continue;
     neighbors.push({
+      protocol: "lldp",
       localPort: rec.localPort ?? null,
+      localIfIndex: null,
       remoteSysName: rec.remoteSysName ?? null,
+      remoteSysDesc: rec.remoteSysDesc ?? null,
       remotePortId: rec.remotePortId ?? null,
+      remotePortDesc: rec.remotePortDesc ?? null,
       remoteChassisId: rec.remoteChassisId ?? null,
       remoteMgmtIp: rec.remoteMgmtIp ?? null,
     });
   }
   return neighbors;
+}
+
+function parseCdp(outputs: Record<string, string>, interfaces: any[]) {
+  const keyToPrefixMap: Record<string, string> = {
+    localIfIndex: "1.3.6.1.4.1.9.9.23.1.2.1.1.1",
+    remoteAddress: "1.3.6.1.4.1.9.9.23.1.2.1.1.4",
+    remoteVersion: "1.3.6.1.4.1.9.9.23.1.2.1.1.5",
+    remoteDeviceId: "1.3.6.1.4.1.9.9.23.1.2.1.1.6",
+    remotePortId: "1.3.6.1.4.1.9.9.23.1.2.1.1.7",
+    remotePlatform: "1.3.6.1.4.1.9.9.23.1.2.1.1.8",
+    remotePrimaryMgmtAddr: "1.3.6.1.4.1.9.9.23.1.2.1.1.20",
+  };
+
+  const ifNameByIndex = new Map<number, string>();
+  for (const iface of interfaces ?? []) {
+    const rawIfIndex = iface?.ifIndex ?? iface?.if_index;
+    const ifIndex = Number(rawIfIndex);
+    if (!Number.isFinite(ifIndex)) continue;
+    const localLabel = String(iface?.ifName ?? iface?.ifDescr ?? "").trim();
+    if (!localLabel) continue;
+    ifNameByIndex.set(ifIndex, localLabel);
+  }
+
+  const remMap = new Map<string, any>();
+
+  const parseTree = (data: string, key: string, prefix: string, sink: Map<string, any>) => {
+    const lines = data.trim().split("\n").filter((l) => l.trim().length);
+    for (const line of lines) {
+      const [oidPart, rest] = line.split(" = ").map((s) => s.trim());
+      if (!oidPart || !rest) continue;
+      const oidFull = normalizeOidNumeric(oidPart);
+      if (!oidFull.startsWith(prefix + ".")) continue;
+      const suffix = oidFull.slice(prefix.length + 1);
+      const parts = suffix.split(".");
+      if (parts.length < 2) continue;
+      const tuple = parts.slice(0, 2).join(".");
+      let val: string | null = snmpValueToString(rest);
+      if (key === "remoteAddress" || key === "remotePrimaryMgmtAddr") {
+        val = parseCdpNetworkAddress(val);
+      }
+      const rec = sink.get(tuple) ?? {};
+      if (val !== null) {
+        rec[key] = val;
+        sink.set(tuple, rec);
+      }
+    }
+  };
+
+  for (const [k, p] of Object.entries(keyToPrefixMap)) {
+    parseTree(outputs[k] ?? "", k, p, remMap);
+  }
+
+  const neighbors: any[] = [];
+  for (const [tuple, rec] of remMap.entries()) {
+    const ifIndex = Number.parseInt(String(rec.localIfIndex ?? tuple.split(".")[0] ?? ""), 10);
+    const localPort =
+      ifNameByIndex.get(ifIndex) ??
+      (Number.isFinite(ifIndex) ? `ifIndex-${ifIndex}` : null);
+    if (!localPort) continue;
+    const remoteSysName = rec.remoteDeviceId ?? null;
+    const remotePortId = rec.remotePortId ?? null;
+    const remoteSysDesc = [rec.remotePlatform ?? null, rec.remoteVersion ?? null].filter(Boolean).join(" • ") || null;
+    const remoteMgmtIp = rec.remotePrimaryMgmtAddr ?? rec.remoteAddress ?? null;
+    if (!remoteSysName && !remotePortId && !remoteMgmtIp) continue;
+    neighbors.push({
+      protocol: "cdp",
+      localPort,
+      localIfIndex: Number.isFinite(ifIndex) ? ifIndex : null,
+      remoteSysName,
+      remoteSysDesc,
+      remotePortId,
+      remotePortDesc: remotePortId,
+      remoteChassisId: remoteSysName ?? remoteMgmtIp ?? null,
+      remoteMgmtIp,
+    });
+  }
+  return neighbors;
+}
+
+function parseCdpNetworkAddress(raw: string | null) {
+  if (raw == null) return null;
+  const trimmed = String(raw).trim();
+  if (!trimmed) return null;
+  if (/^\d{1,3}(?:\.\d{1,3}){3}$/.test(trimmed)) return trimmed;
+  const hexTokens = trimmed
+    .split(/[ ,:]+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+  if (hexTokens.length === 4 && hexTokens.every((token) => /^[0-9a-fA-F]{2}$/.test(token))) {
+    return hexTokens.map((token) => Number.parseInt(token, 16)).join(".");
+  }
+  return trimmed;
 }
 
 function normalizeOidNumeric(oidPart: string): string {
@@ -1064,7 +1237,7 @@ function normalizeCollectedSerialValue(raw: unknown): string | null {
 function persistDiscoveryNormalization(
   db: DB,
   deviceId: number,
-  discovery: { system: any; interfaces: any[]; lldpNeighbors: any[] },
+  discovery: { system: any; interfaces: any[]; lldpNeighbors: any[]; pathNeighbors?: any[] },
   collectedAt: string,
   options: PersistDiscoveryOptions = {}
 ): PersistDiscoveryResult {
@@ -1223,9 +1396,12 @@ function persistDiscoveryNormalization(
     );
   }
   try {
-    const neighborsRaw = (discovery.lldpNeighbors ?? []).map((n: any) => ({
+    const neighborsRaw = (discovery.pathNeighbors ?? discovery.lldpNeighbors ?? []).map((n: any) => ({
+      protocol: n?.protocol ?? null,
       localPort: n?.localPort ?? n?.local_port ?? n?.localPortId ?? null,
+      localIfIndex: n?.localIfIndex ?? n?.local_if_index ?? null,
       remoteSysName: n?.remoteSysName ?? n?.remote_sys_name ?? null,
+      remoteSysDesc: n?.remoteSysDesc ?? n?.remote_sys_desc ?? null,
       remotePortId: n?.remotePortId ?? n?.remote_port_id ?? null,
       remotePortDesc: n?.remotePortDesc ?? n?.remote_port_desc ?? null,
       remoteChassisId: n?.remoteChassisId ?? n?.remote_chassis_id ?? null,
@@ -1237,7 +1413,7 @@ function persistDiscoveryNormalization(
       console.error(
         JSON.stringify({
           level: "warn",
-          msg: "lldp_neighbors_dropped_missing_local_port",
+          msg: "path_neighbors_dropped_missing_local_port",
           deviceId,
           dropped: droppedNeighbors,
           total: neighborsRaw.length,
@@ -1252,7 +1428,7 @@ function persistDiscoveryNormalization(
       });
     }
   } catch (err) {
-    console.error(JSON.stringify({ level: "warn", msg: "lldp_enqueue_failed", deviceId, err: (err as any)?.message }));
+    console.error(JSON.stringify({ level: "warn", msg: "path_neighbors_enqueue_failed", deviceId, err: (err as any)?.message }));
   }
   try {
     const ifacePayload = (derivedInterfaces ?? [])

@@ -50,7 +50,7 @@ export function enqueueDeviceSnapshot(item: {
       assetTag: item.assetTag ?? null,
       serialNumber: item.serialNumber ?? null,
       status: item.status,
-      snmpProfileId: item.snmpProfileId ?? null,
+      ...(item.snmpProfileId !== undefined ? { snmpProfileId: item.snmpProfileId } : {}),
       snmpPollerIds: item.snmpPollerIds,
       successCount: item.successCount,
       failureCount: item.failureCount,
@@ -139,8 +139,11 @@ export function enqueueSnmpPollerSnapshot(item: {
 export function enqueueLldpNeighbors(item: {
   deviceId: string;
   neighbors: Array<{
+    protocol?: string | null;
     localPort?: string | null;
+    localIfIndex?: number | null;
     remoteSysName?: string | null;
+    remoteSysDesc?: string | null;
     remotePortId?: string | null;
     remotePortDesc?: string | null;
     remoteChassisId?: string | null;
