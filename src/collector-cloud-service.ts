@@ -2,9 +2,18 @@ import { setCloudState } from "./runtime-state.js";
 import type { AppConfig } from "./config.js";
 import type { DB } from "./db.js";
 import { setLicenseState } from "./db.js";
-import { sendPing, fetchCollectorConfig, type CloudAuthState } from "./xmon-client.js";
+import { sendPing, fetchCollectorConfig, fetchCollectorUplinkFiberConfig, type CloudAuthState } from "./xmon-client.js";
 import { enqueueTelemetry, startTelemetryQueue } from "./telemetry-queue.js";
-import { getAllAppConfig, getDevicePollHealth, listDevices, listPollProfiles, listPollTargets, updateCloudSyncState, upsertAppConfigEntries } from "./db.js";
+import {
+  getAllAppConfig,
+  getDevicePollHealth,
+  listDevices,
+  listPollProfiles,
+  listPollTargets,
+  replaceUplinkFiberConfigForDevices,
+  updateCloudSyncState,
+  upsertAppConfigEntries,
+} from "./db.js";
 import { enqueueDeviceSnapshot, enqueueDeviceState, enqueueSnmpProfileSnapshot, enqueueSnmpPollerSnapshot } from "./telemetry-queue.js";
 import { startCollectorRpcSession } from "./collector-rpc-session.js";
 
@@ -202,8 +211,13 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
     while (!stopped) {
       let retryAfterSec: number | undefined;
       try {
-        const res = await fetchCollectorConfig(resolveCloudCfg());
+        const resolvedCloudCfg = resolveCloudCfg();
+        const res = await fetchCollectorConfig(resolvedCloudCfg);
+        const uplinkRes = await fetchCollectorUplinkFiberConfig(resolvedCloudCfg);
         retryAfterSec = res.retryAfterSec;
+        if (typeof uplinkRes.retryAfterSec === "number") {
+          retryAfterSec = typeof retryAfterSec === "number" ? Math.max(retryAfterSec, uplinkRes.retryAfterSec) : uplinkRes.retryAfterSec;
+        }
         if (db) {
           // surface drift visibility: mark last fetch even if not applied
           const nowIso = new Date().toISOString();
@@ -211,12 +225,79 @@ export function startCollectorCloudBridge(cfg: AppConfig, db: DB) {
             enabled: true,
             status: res.config ? "fetched_not_applied" : "fetched_empty",
             lastSyncAt: nowIso,
-            cloudEndpoint: resolveCloudCfg().xmonApiBase,
+            cloudEndpoint: resolvedCloudCfg.xmonApiBase,
           });
           if (res.config) {
             upsertAppConfigEntries(db, {
               XMON_LAST_CONFIG: JSON.stringify(res.config),
               XMON_LAST_CONFIG_AT: nowIso,
+            });
+          }
+
+          const saved = getAllAppConfig(db);
+          const previousRowCountRaw = Number.parseInt(String(saved["XMON_UPLINK_FIBER_ROW_COUNT"] ?? "0"), 10);
+          let nextRowCount = Number.isFinite(previousRowCountRaw) && previousRowCountRaw >= 0 ? previousRowCountRaw : 0;
+          let syncStatus = "fetch_failed";
+
+          if (uplinkRes.snapshot) {
+            const currentScopeIds = Array.from(
+              new Set(
+                uplinkRes.snapshot.deviceIds
+                  .map((entry) => Number.parseInt(String(entry ?? "").trim(), 10))
+                  .filter((entry) => Number.isInteger(entry) && entry > 0),
+              ),
+            );
+            const prevScopeRaw = saved["XMON_UPLINK_FIBER_SCOPE_DEVICE_IDS"] ?? "[]";
+            let previousScopeIds: number[] = [];
+            try {
+              const parsed = JSON.parse(prevScopeRaw);
+              if (Array.isArray(parsed)) {
+                previousScopeIds = parsed
+                  .map((entry) => Number.parseInt(String(entry ?? "").trim(), 10))
+                  .filter((entry) => Number.isInteger(entry) && entry > 0);
+              }
+            } catch {
+              previousScopeIds = [];
+            }
+
+            const replacementScope = Array.from(new Set([...previousScopeIds, ...currentScopeIds]));
+            const replaceRows = uplinkRes.snapshot.rows.map((row) => ({
+              deviceId: Number.parseInt(String(row.deviceId ?? "").trim(), 10),
+              stableInterfaceKey: row.stableInterfaceKey,
+              localIfIndex: row.localIfIndex ?? null,
+              localPortNormalized: row.localPortNormalized ?? null,
+              localPortDisplay: row.localPortDisplay ?? null,
+              cableCount: row.cableCount ?? null,
+              bufferColor: row.bufferColor ?? null,
+              txStrandColor: row.txStrandColor ?? null,
+              rxStrandColor: row.rxStrandColor ?? null,
+              jumperMode: row.jumperMode ?? null,
+              connectorType: row.connectorType ?? null,
+              patchPanelPorts: row.patchPanelPorts ?? null,
+              sfpDetected: row.sfpDetected ?? null,
+              sfpPartNumber: row.sfpPartNumber ?? null,
+              rxLight: row.rxLight ?? null,
+              txLight: row.txLight ?? null,
+              updatedAt: row.updatedAt ?? null,
+            }));
+            nextRowCount = replaceUplinkFiberConfigForDevices(db, {
+              deviceIds: replacementScope,
+              rows: replaceRows,
+            });
+            syncStatus = "ok";
+
+            upsertAppConfigEntries(db, {
+              XMON_UPLINK_FIBER_SCOPE_DEVICE_IDS: JSON.stringify(currentScopeIds),
+              XMON_UPLINK_FIBER_SYNC_AT: nowIso,
+              XMON_UPLINK_FIBER_ROW_COUNT: String(nextRowCount),
+              XMON_UPLINK_FIBER_SYNC_STATUS: syncStatus,
+            });
+          } else {
+            syncStatus = typeof uplinkRes.retryAfterSec === "number" ? "rate_limited" : "fetch_failed";
+            upsertAppConfigEntries(db, {
+              XMON_UPLINK_FIBER_SYNC_AT: nowIso,
+              XMON_UPLINK_FIBER_ROW_COUNT: String(nextRowCount),
+              XMON_UPLINK_FIBER_SYNC_STATUS: syncStatus,
             });
           }
         }

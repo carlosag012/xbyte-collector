@@ -242,6 +242,29 @@ export function initDatabase(config: AppConfig): DB {
       collected_at TEXT NOT NULL,
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS xmon_uplink_fiber_config (
+      device_id INTEGER NOT NULL,
+      stable_interface_key TEXT NOT NULL,
+      local_if_index INTEGER,
+      local_port_normalized TEXT,
+      local_port_display TEXT,
+      cable_count TEXT,
+      buffer_color TEXT,
+      tx_strand_color TEXT,
+      rx_strand_color TEXT,
+      jumper_mode TEXT,
+      connector_type TEXT,
+      patch_panel_ports TEXT,
+      sfp_detected TEXT,
+      sfp_part_number TEXT,
+      rx_light TEXT,
+      tx_light TEXT,
+      updated_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(device_id, stable_interface_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_xmon_uplink_fiber_config_device
+      ON xmon_uplink_fiber_config(device_id);
     CREATE TABLE IF NOT EXISTS availability_state_current (
       device_id INTEGER PRIMARY KEY,
       current_state TEXT NOT NULL,
@@ -2915,6 +2938,136 @@ export function replaceLldpNeighborsForDevice(
     }
   });
   tx();
+}
+
+export type UplinkFiberConfigReplicaRow = {
+  deviceId: number;
+  stableInterfaceKey: string;
+  localIfIndex?: number | null;
+  localPortNormalized?: string | null;
+  localPortDisplay?: string | null;
+  cableCount?: string | null;
+  bufferColor?: string | null;
+  txStrandColor?: string | null;
+  rxStrandColor?: string | null;
+  jumperMode?: string | null;
+  connectorType?: string | null;
+  patchPanelPorts?: string | null;
+  sfpDetected?: string | null;
+  sfpPartNumber?: string | null;
+  rxLight?: string | null;
+  txLight?: string | null;
+  updatedAt?: string | null;
+};
+
+function normalizeOptionalText(value: unknown): string | null {
+  const normalized = String(value ?? "").trim();
+  return normalized.length ? normalized : null;
+}
+
+export function replaceUplinkFiberConfigForDevices(
+  db: DB,
+  input: {
+    deviceIds: number[];
+    rows: UplinkFiberConfigReplicaRow[];
+  },
+) {
+  const scopedDeviceIds = Array.from(
+    new Set(
+      (input.deviceIds ?? [])
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0),
+    ),
+  );
+  if (!scopedDeviceIds.length) return 0;
+  const scopedSet = new Set(scopedDeviceIds);
+  const now = new Date().toISOString();
+  const rows = (input.rows ?? [])
+    .map((row) => {
+      const deviceId = Number(row.deviceId);
+      const stableInterfaceKey = String(row.stableInterfaceKey ?? "").trim();
+      if (!Number.isInteger(deviceId) || deviceId <= 0 || !stableInterfaceKey || !scopedSet.has(deviceId)) return null;
+      return {
+        deviceId,
+        stableInterfaceKey,
+        localIfIndex:
+          row.localIfIndex === null || row.localIfIndex === undefined
+            ? null
+            : Number.isInteger(Number(row.localIfIndex))
+              ? Number(row.localIfIndex)
+              : null,
+        localPortNormalized: normalizeOptionalText(row.localPortNormalized),
+        localPortDisplay: normalizeOptionalText(row.localPortDisplay),
+        cableCount: normalizeOptionalText(row.cableCount),
+        bufferColor: normalizeOptionalText(row.bufferColor),
+        txStrandColor: normalizeOptionalText(row.txStrandColor),
+        rxStrandColor: normalizeOptionalText(row.rxStrandColor),
+        jumperMode: normalizeOptionalText(row.jumperMode),
+        connectorType: normalizeOptionalText(row.connectorType),
+        patchPanelPorts: normalizeOptionalText(row.patchPanelPorts),
+        sfpDetected: normalizeOptionalText(row.sfpDetected),
+        sfpPartNumber: normalizeOptionalText(row.sfpPartNumber),
+        rxLight: normalizeOptionalText(row.rxLight),
+        txLight: normalizeOptionalText(row.txLight),
+        updatedAt: normalizeOptionalText(row.updatedAt) ?? now,
+      };
+    })
+    .filter((row): row is NonNullable<typeof row> => row !== null);
+
+  let insertedCount = 0;
+  const tx = db.transaction(() => {
+    const placeholders = scopedDeviceIds.map(() => "?").join(", ");
+    db.prepare(`DELETE FROM xmon_uplink_fiber_config WHERE device_id IN (${placeholders})`).run(...scopedDeviceIds);
+    if (!rows.length) return;
+    const insertStmt = db.prepare(
+      `INSERT INTO xmon_uplink_fiber_config (
+        device_id, stable_interface_key, local_if_index, local_port_normalized, local_port_display,
+        cable_count, buffer_color, tx_strand_color, rx_strand_color, jumper_mode, connector_type, patch_panel_ports,
+        sfp_detected, sfp_part_number, rx_light, tx_light, updated_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    for (const row of rows) {
+      insertStmt.run(
+        row.deviceId,
+        row.stableInterfaceKey,
+        row.localIfIndex,
+        row.localPortNormalized,
+        row.localPortDisplay,
+        row.cableCount,
+        row.bufferColor,
+        row.txStrandColor,
+        row.rxStrandColor,
+        row.jumperMode,
+        row.connectorType,
+        row.patchPanelPorts,
+        row.sfpDetected,
+        row.sfpPartNumber,
+        row.rxLight,
+        row.txLight,
+        row.updatedAt,
+        now,
+      );
+      insertedCount += 1;
+    }
+  });
+  tx();
+  return insertedCount;
+}
+
+export function listUplinkFiberConfigForDevice(db: DB, deviceId: number) {
+  return db
+    .prepare(
+      `SELECT device_id as deviceId, stable_interface_key as stableInterfaceKey,
+              local_if_index as localIfIndex, local_port_normalized as localPortNormalized, local_port_display as localPortDisplay,
+              cable_count as cableCount, buffer_color as bufferColor, tx_strand_color as txStrandColor, rx_strand_color as rxStrandColor,
+              jumper_mode as jumperMode, connector_type as connectorType, patch_panel_ports as patchPanelPorts,
+              sfp_detected as sfpDetected, sfp_part_number as sfpPartNumber, rx_light as rxLight, tx_light as txLight,
+              updated_at as updatedAt, created_at as createdAt
+       FROM xmon_uplink_fiber_config
+       WHERE device_id = ?
+       ORDER BY stable_interface_key ASC`,
+    )
+    .all(deviceId) as any[];
 }
 
 export function upsertDiscoveredDeviceCandidatesFromLldp(

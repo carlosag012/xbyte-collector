@@ -14,6 +14,32 @@ type ConfigResponse = {
   config?: any;
 };
 
+export type CollectorUplinkFiberConfigRow = {
+  deviceId: string;
+  stableInterfaceKey: string;
+  localIfIndex?: number | null;
+  localPortNormalized?: string | null;
+  localPortDisplay?: string | null;
+  cableCount?: string | null;
+  bufferColor?: string | null;
+  txStrandColor?: string | null;
+  rxStrandColor?: string | null;
+  jumperMode?: string | null;
+  connectorType?: string | null;
+  patchPanelPorts?: string | null;
+  sfpDetected?: string | null;
+  sfpPartNumber?: string | null;
+  rxLight?: string | null;
+  txLight?: string | null;
+  updatedAt?: string | null;
+};
+
+export type CollectorUplinkFiberConfigSnapshot = {
+  collectorId: string;
+  deviceIds: string[];
+  rows: CollectorUplinkFiberConfigRow[];
+};
+
 export type CloudAuthState = {
   authorized: boolean;
   collectionAllowed: boolean;
@@ -158,9 +184,78 @@ export async function fetchCollectorConfig(cfg: AppConfig): Promise<{ config: an
     }
     if (!res.ok) return { config: null };
     const body = (await res.json().catch(() => ({}))) as ConfigResponse;
-    return { config: body?.config ?? null };
+    const candidate =
+      body && typeof body === "object" && "config" in body ? body?.config ?? null : body;
+    return { config: candidate && typeof candidate === "object" ? candidate : null };
   } catch {
     return { config: null };
+  }
+}
+
+export async function fetchCollectorUplinkFiberConfig(
+  cfg: AppConfig,
+): Promise<{ snapshot: CollectorUplinkFiberConfigSnapshot | null; retryAfterSec?: number }> {
+  if (!cfg.xmonCollectorId || !cfg.xmonApiKey) return { snapshot: null };
+  try {
+    const res = await doFetch(`${cfg.xmonApiBase}/collectors/${encodeURIComponent(cfg.xmonCollectorId)}/uplink-fiber-config`, {
+      method: "GET",
+      headers: { "x-xmon-api-key": cfg.xmonApiKey },
+    });
+    if (res.status === 429) {
+      const retryAfter = Number(res.headers.get("retry-after")) || undefined;
+      return { snapshot: null, retryAfterSec: retryAfter };
+    }
+    if (!res.ok) return { snapshot: null };
+    const body = (await res.json().catch(() => null)) as any;
+    if (!body || typeof body !== "object") return { snapshot: null };
+
+    const collectorId = String(body.collectorId ?? "").trim();
+    if (!collectorId) return { snapshot: null };
+
+    const deviceIds = Array.isArray(body.deviceIds)
+      ? body.deviceIds.map((entry: unknown) => String(entry ?? "").trim()).filter((entry: string) => entry.length > 0)
+      : [];
+    const rows = Array.isArray(body.rows) ? body.rows : [];
+    const parsedRows: CollectorUplinkFiberConfigRow[] = [];
+    for (const row of rows) {
+      if (!row || typeof row !== "object") continue;
+      const raw = row as Record<string, unknown>;
+      const deviceId = String(raw.deviceId ?? "").trim();
+      const stableInterfaceKey = String(raw.stableInterfaceKey ?? "").trim();
+      if (!deviceId || !stableInterfaceKey) continue;
+      const localIfIndexValue = raw.localIfIndex;
+      const localIfIndexNumber =
+        localIfIndexValue === null || localIfIndexValue === undefined ? null : Number(localIfIndexValue);
+      parsedRows.push({
+        deviceId,
+        stableInterfaceKey,
+        localIfIndex: Number.isInteger(localIfIndexNumber) ? localIfIndexNumber : null,
+        localPortNormalized: raw.localPortNormalized == null ? null : String(raw.localPortNormalized).trim() || null,
+        localPortDisplay: raw.localPortDisplay == null ? null : String(raw.localPortDisplay).trim() || null,
+        cableCount: raw.cableCount == null ? null : String(raw.cableCount).trim() || null,
+        bufferColor: raw.bufferColor == null ? null : String(raw.bufferColor).trim() || null,
+        txStrandColor: raw.txStrandColor == null ? null : String(raw.txStrandColor).trim() || null,
+        rxStrandColor: raw.rxStrandColor == null ? null : String(raw.rxStrandColor).trim() || null,
+        jumperMode: raw.jumperMode == null ? null : String(raw.jumperMode).trim() || null,
+        connectorType: raw.connectorType == null ? null : String(raw.connectorType).trim() || null,
+        patchPanelPorts: raw.patchPanelPorts == null ? null : String(raw.patchPanelPorts).trim() || null,
+        sfpDetected: raw.sfpDetected == null ? null : String(raw.sfpDetected).trim() || null,
+        sfpPartNumber: raw.sfpPartNumber == null ? null : String(raw.sfpPartNumber).trim() || null,
+        rxLight: raw.rxLight == null ? null : String(raw.rxLight).trim() || null,
+        txLight: raw.txLight == null ? null : String(raw.txLight).trim() || null,
+        updatedAt: raw.updatedAt == null ? null : String(raw.updatedAt).trim() || null,
+      });
+    }
+
+    return {
+      snapshot: {
+        collectorId,
+        deviceIds,
+        rows: parsedRows,
+      },
+    };
+  } catch {
+    return { snapshot: null };
   }
 }
 
