@@ -304,24 +304,16 @@ function isExcludedByDefaultInterfaceLabel(label: string): boolean {
   return false;
 }
 
-function isLikelyPhysicalUplinkLabel(label: string): boolean {
+function hasExplicitUplinkIntentLabel(label: string): boolean {
   const normalized = String(label ?? "").trim().toLowerCase();
   if (!normalized) return false;
-  if (/\b(uplink|trunk|core|backbone|wan|transit|peer)\b/.test(normalized)) return true;
-  if (
-    /^(te|twe|tw|fo|hu|xe|et|xg|qsfp|sfp|tengig|fortygig|hundredgig|twentyfivegig|tengigabitethernet|fortygigabitethernet|hundredgige|twentyfivegige)/.test(
-      normalized,
-    )
-  ) {
-    return true;
-  }
-  return false;
+  return /\b(uplink|trunk|core|backbone|wan|transit|peer)\b/.test(normalized);
 }
 
 function isCandidateUplinkInterface(row: CorrelatedInterfaceRow): boolean {
   if (row.hasDocumentedFiber || row.hasRelationshipEvidence) return true;
   if (isExcludedByDefaultInterfaceLabel(row.localPortLabel)) return false;
-  return isLikelyPhysicalUplinkLabel(row.localPortLabel);
+  return hasExplicitUplinkIntentLabel(row.localPortLabel);
 }
 
 export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): UplinkCorrelationSnapshot | null {
