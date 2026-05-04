@@ -130,6 +130,8 @@ export type UplinkCorrelationSnapshot = {
   ipAddress: string | null;
   pollHealth: DevicePollHealth | null;
   generatedAt: string;
+  totalInterfaceCount: number;
+  candidateUplinkCount: number;
   likelyIssueCategory: UplinkCorrelationCategory;
   confidence: UplinkCorrelationConfidence;
   summary: string;
@@ -286,16 +288,40 @@ function categorySummary(category: UplinkCorrelationCategory): string {
   }
 }
 
-function pickRelevantInterfaces(rows: CorrelatedInterfaceRow[]): CorrelatedInterfaceRow[] {
-  const relevant = rows.filter(
-    (row) =>
-      row.hasRelationshipEvidence ||
-      row.hasDocumentedFiber ||
-      row.adminStatus !== "up" ||
-      row.operStatus !== "up",
-  );
-  if (relevant.length) return relevant;
-  return rows.slice(0, 10);
+function isExcludedByDefaultInterfaceLabel(label: string): boolean {
+  const normalized = String(label ?? "").trim().toLowerCase();
+  if (!normalized) return true;
+  if (/^(vl|vlan)\b/.test(normalized)) return true;
+  if (/^loopback\b|^lo\d*$/.test(normalized)) return true;
+  if (/^tunnel\b|^tu\d*$/.test(normalized)) return true;
+  if (/^port-?channel\b|^po\d+/.test(normalized)) return true;
+  if (/^null\d*$/.test(normalized)) return true;
+  if (/^nvi\d*$/.test(normalized)) return true;
+  if (/^bdi\d*$/.test(normalized)) return true;
+  if (/^irb\d*$/.test(normalized)) return true;
+  if (/^veth\b|^virtual\b|^docker\b|^tap\b|^tun\d*$/.test(normalized)) return true;
+  if (/(^|[-_ .])(stack|internal|backplane|fabric|cpu)([-_ .]|$)/.test(normalized)) return true;
+  return false;
+}
+
+function isLikelyPhysicalUplinkLabel(label: string): boolean {
+  const normalized = String(label ?? "").trim().toLowerCase();
+  if (!normalized) return false;
+  if (/\b(uplink|trunk|core|backbone|wan|transit|peer)\b/.test(normalized)) return true;
+  if (
+    /^(te|twe|tw|fo|hu|xe|et|xg|qsfp|sfp|tengig|fortygig|hundredgig|twentyfivegig|tengigabitethernet|fortygigabitethernet|hundredgige|twentyfivegige)/.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isCandidateUplinkInterface(row: CorrelatedInterfaceRow): boolean {
+  if (row.hasDocumentedFiber || row.hasRelationshipEvidence) return true;
+  if (isExcludedByDefaultInterfaceLabel(row.localPortLabel)) return false;
+  return isLikelyPhysicalUplinkLabel(row.localPortLabel);
 }
 
 export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): UplinkCorrelationSnapshot | null {
@@ -447,11 +473,11 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
     };
   });
 
-  const relevantRows = pickRelevantInterfaces(correlatedRows);
+  const candidateRows = correlatedRows.filter((row) => isCandidateUplinkInterface(row));
 
   const blastRadiusCandidates: BlastRadiusCandidate[] = [];
   const seenBlast = new Set<string>();
-  for (const row of relevantRows) {
+  for (const row of candidateRows) {
     if (!row.matchedNeighbor) continue;
     if (row.likelyCauseCategory === "healthy" || row.likelyCauseCategory === "admin_shutdown") continue;
     const key = `${row.localPortLabel}|${row.matchedNeighbor.remoteMgmtIp ?? ""}|${row.matchedNeighbor.remoteSysName ?? ""}`;
@@ -467,7 +493,7 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
   }
 
   const topRow =
-    relevantRows
+    candidateRows
       .slice()
       .sort((a, b) => {
         const byPriority = categoryPriority(b.likelyCauseCategory) - categoryPriority(a.likelyCauseCategory);
@@ -475,15 +501,16 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
         return confidenceScore(b.confidence) - confidenceScore(a.confidence);
       })[0] ?? null;
 
-  const likelyIssueCategory = topRow?.likelyCauseCategory ?? "healthy";
-  const confidence = topRow?.confidence ?? "high";
-  const issueRows = relevantRows.filter((row) => row.likelyCauseCategory !== "healthy");
-  const affectedUplinkCount = issueRows.filter((row) => row.hasRelationshipEvidence || row.hasDocumentedFiber).length;
+  const likelyIssueCategory = topRow?.likelyCauseCategory ?? "degraded_unknown";
+  const confidence = topRow?.confidence ?? "low";
+  const issueRows = candidateRows.filter((row) => row.likelyCauseCategory !== "healthy");
+  const affectedUplinkCount = issueRows.length;
 
-  const summary =
-    likelyIssueCategory === "healthy"
-      ? "No likely uplink or fiber-path issues detected from current local collector evidence."
-      : `Likely ${categorySummary(likelyIssueCategory)} on ${issueRows.length} interface(s); ${blastRadiusCandidates.length} one-hop blast radius candidate(s).`;
+  const summary = candidateRows.length
+    ? likelyIssueCategory === "healthy"
+      ? "No likely uplink or fiber-path issues detected from current candidate uplink evidence."
+      : `Likely ${categorySummary(likelyIssueCategory)} on ${issueRows.length} candidate uplink interface(s); ${blastRadiusCandidates.length} one-hop blast radius candidate(s).`
+    : "No candidate uplink interfaces matched documented fiber, relationship evidence, or physical uplink patterns.";
 
   return {
     deviceId: device.id,
@@ -491,12 +518,14 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
     ipAddress: device.ipAddress ?? null,
     pollHealth,
     generatedAt: new Date().toISOString(),
+    totalInterfaceCount: correlatedRows.length,
+    candidateUplinkCount: candidateRows.length,
     likelyIssueCategory,
     confidence,
     summary,
     affectedUplinkCount,
     likelyBlastRadiusCount: blastRadiusCandidates.length,
     blastRadiusCandidates,
-    correlatedInterfaces: relevantRows,
+    correlatedInterfaces: candidateRows,
   };
 }
