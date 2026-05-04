@@ -122,6 +122,7 @@ import { startCollectorCloudBridge } from "./collector-cloud-service.js";
 import { sendPing, activateAppliance } from "./xmon-client.js";
 import { loadApplianceIdentity, buildApplianceSummary } from "./appliance-state.js";
 import { startApplianceSync } from "./appliance-sync.js";
+import { buildUplinkCorrelationSnapshot } from "./uplink-correlation.js";
 
 const config = loadConfig();
 let cloudBridgeStarted = false;
@@ -1268,6 +1269,32 @@ const server = createServer((req, res) => {
       const candidates = listDiscoveredCandidatesForSourceDevice(db, sourceDeviceId);
       res.writeHead(200);
       res.end(JSON.stringify({ ok: true, candidates }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url.startsWith("/api/tdt/uplink-correlation")) {
+    try {
+      if (!db) throw new Error("db missing");
+      const parsed = new URL(req.url ?? "/api/tdt/uplink-correlation", "http://localhost");
+      const deviceIdStr = parsed.searchParams.get("deviceId");
+      const deviceId = Number(deviceIdStr);
+      if (!deviceIdStr || !Number.isFinite(deviceId) || deviceId <= 0 || !Number.isInteger(deviceId)) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_tdt_uplink_correlation_query" }));
+        return;
+      }
+      const snapshot = buildUplinkCorrelationSnapshot(db, deviceId);
+      if (!snapshot) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ ok: false, error: "device_not_found" }));
+        return;
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, snapshot }));
     } catch {
       res.writeHead(500);
       res.end(JSON.stringify({ ok: false, error: "db_error" }));
