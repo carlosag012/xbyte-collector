@@ -3,6 +3,7 @@ import {
   getDeviceById,
   getDevicePollHealth,
   listInterfaceSnapshotsForDevice,
+  listDevices,
   listNeighborsWithReview,
   listUplinkFiberConfigForDevice,
   type DB,
@@ -40,6 +41,7 @@ type InterfaceSnapshotRow = {
 };
 
 type NeighborWithReviewRow = {
+  deviceId: number | null;
   localPort: string | null;
   remoteSysName: string | null;
   remotePortId: string | null;
@@ -48,6 +50,7 @@ type NeighborWithReviewRow = {
   collectedAt: string;
   linkedDeviceId: number | null;
   reviewStatus: string | null;
+  promotedDeviceId: number | null;
 };
 
 type FiberConfigRow = {
@@ -76,6 +79,8 @@ export type CorrelationNeighborSummary = {
   remoteMgmtIp: string | null;
   collectedAt: string;
   linkedDeviceId: number | null;
+  reviewStatus: string | null;
+  promotedDeviceId: number | null;
   linkedDeviceHostname: string | null;
   linkedDeviceHealthStatus: string | null;
 };
@@ -149,10 +154,110 @@ export type UplinkCorrelationSnapshot = {
   correlatedInterfaces: CorrelatedInterfaceRow[];
 };
 
+export type TopologyNode = {
+  id: string;
+  kind: "local_device" | "unresolved_remote";
+  deviceId: number | null;
+  hostname: string | null;
+  ipAddress: string | null;
+  type: string | null;
+  site: string | null;
+  org: string | null;
+  pollHealth: {
+    currentStatus: string | null;
+    lastPollAt: string | null;
+    lastSuccessAt: string | null;
+    lastFailureAt: string | null;
+    lastError: string | null;
+  } | null;
+  unresolvedFingerprint: {
+    remoteSysName: string | null;
+    remotePortId: string | null;
+    remoteChassisId: string | null;
+    remoteMgmtIp: string | null;
+    fingerprint: string;
+    sourceDeviceId: number;
+    sourceStableInterfaceKey: string;
+  } | null;
+};
+
+export type TopologyEdge = {
+  id: string;
+  sourceNodeId: string;
+  targetNodeId: string;
+  sourceDeviceId: number;
+  stableInterfaceKey: string;
+  localIfIndex: number | null;
+  localPortLabel: string;
+  remoteSysName: string | null;
+  remotePortId: string | null;
+  remoteChassisId: string | null;
+  remoteMgmtIp: string | null;
+  collectedAt: string | null;
+  linkedDeviceId: number | null;
+  reviewStatus: string | null;
+  promotedDeviceId: number | null;
+  hasDocumentedFiber: boolean;
+  matchedFiberConfig: CorrelationFiberSummary | null;
+  remoteNeighborRole: RemoteNeighborRole;
+  remoteNeighborRoleConfidence: UplinkCorrelationConfidence;
+  pathCriticalityScore: number;
+  pathCriticalityTier: PathCriticalityTier;
+  drivesTopLevel: boolean;
+  likelyCauseCategory: UplinkCorrelationCategory;
+  confidence: UplinkCorrelationConfidence;
+};
+
+export type TopologySnapshot = {
+  generatedAt: string;
+  scope: {
+    kind: "single_device" | "all_devices";
+    deviceId: number | null;
+  };
+  counts: {
+    nodeCount: number;
+    edgeCount: number;
+    drivingEdgeCount: number;
+    unresolvedEdgeCount: number;
+  };
+  nodes: TopologyNode[];
+  edges: TopologyEdge[];
+};
+
 function normalizePortIdentity(value: unknown): string | null {
   const raw = String(value ?? "").trim().toLowerCase();
   if (!raw) return null;
   return raw.replace(/\s+/g, "").replace(/["']/g, "");
+}
+
+function normalizeEdgeToken(value: unknown): string {
+  const normalized = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[^a-z0-9._:-]/g, "");
+  return normalized || "na";
+}
+
+function buildRemoteFingerprint(input: {
+  remoteSysName: string | null | undefined;
+  remotePortId: string | null | undefined;
+  remoteChassisId: string | null | undefined;
+  remoteMgmtIp: string | null | undefined;
+}): string {
+  const chassis = normalizeEdgeToken(input.remoteChassisId);
+  const mgmt = normalizeEdgeToken(input.remoteMgmtIp);
+  const sys = normalizeEdgeToken(input.remoteSysName);
+  const port = normalizeEdgeToken(input.remotePortId);
+  return `ch:${chassis}|ip:${mgmt}|sys:${sys}|rp:${port}`;
+}
+
+function buildUnresolvedNodeId(sourceDeviceId: number, sourceStableInterfaceKey: string, remoteFingerprint: string): string {
+  return `unresolved:${sourceDeviceId}:${normalizeEdgeToken(sourceStableInterfaceKey)}:${normalizeEdgeToken(remoteFingerprint)}`;
+}
+
+function buildEdgeId(sourceDeviceId: number, sourceStableInterfaceKey: string, remoteFingerprint: string): string {
+  return `edge:${sourceDeviceId}:${normalizeEdgeToken(sourceStableInterfaceKey)}:${normalizeEdgeToken(remoteFingerprint)}`;
 }
 
 function buildStableInterfaceKey(ifIndex: number | null, localPortLabel: string): string {
@@ -161,6 +266,27 @@ function buildStableInterfaceKey(ifIndex: number | null, localPortLabel: string)
   }
   const normalizedPort = normalizePortIdentity(localPortLabel);
   return normalizedPort ? `port:${normalizedPort}` : `port:${localPortLabel.toLowerCase()}`;
+}
+
+function buildDeviceNode(device: DeviceRow, pollHealth: DevicePollHealth): TopologyNode {
+  return {
+    id: `device:${device.id}`,
+    kind: "local_device",
+    deviceId: device.id,
+    hostname: device.hostname ?? null,
+    ipAddress: device.ipAddress ?? null,
+    type: device.type ?? null,
+    site: device.site ?? null,
+    org: device.org ?? null,
+    pollHealth: {
+      currentStatus: pollHealth.currentStatus ?? null,
+      lastPollAt: pollHealth.lastPollAt ?? null,
+      lastSuccessAt: pollHealth.lastSuccessAt ?? null,
+      lastFailureAt: pollHealth.lastFailureAt ?? null,
+      lastError: pollHealth.lastError ?? null,
+    },
+    unresolvedFingerprint: null,
+  };
 }
 
 function normalizeAdminStatus(value: unknown): StatusNormalized {
@@ -597,6 +723,8 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
           remoteMgmtIp: matchedNeighbor.remoteMgmtIp ?? null,
           collectedAt: matchedNeighbor.collectedAt,
           linkedDeviceId,
+          reviewStatus: matchedNeighbor.reviewStatus ?? null,
+          promotedDeviceId: matchedNeighbor.promotedDeviceId ?? null,
           linkedDeviceHostname: linkedDevice?.hostname ?? null,
           linkedDeviceHealthStatus: linkedHealth?.currentStatus ?? null,
         }
@@ -708,5 +836,197 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
     likelyBlastRadiusCount: blastRadiusCandidates.length,
     blastRadiusCandidates,
     correlatedInterfaces: candidateRows,
+  };
+}
+
+export function buildTopologySnapshot(db: DB, input?: { deviceId?: number }): TopologySnapshot | null {
+  const scopeDeviceId = input?.deviceId;
+  if (scopeDeviceId !== undefined && scopeDeviceId !== null) {
+    const exists = getDeviceById(db, scopeDeviceId);
+    if (!exists) return null;
+  }
+
+  const scopedDevices = scopeDeviceId
+    ? listDevices(db).filter((device) => device.id === scopeDeviceId)
+    : listDevices(db);
+
+  const nodeMap = new Map<string, TopologyNode>();
+  const edgeMap = new Map<string, TopologyEdge>();
+
+  const ensureLocalDeviceNode = (deviceId: number) => {
+    const nodeId = `device:${deviceId}`;
+    if (nodeMap.has(nodeId)) return;
+    const device = getDeviceById(db, deviceId);
+    if (!device) return;
+    nodeMap.set(nodeId, buildDeviceNode(device, getDevicePollHealth(db, deviceId)));
+  };
+
+  const addUnresolvedNode = (edge: TopologyEdge, sourceStableInterfaceKey: string, remoteFingerprint: string) => {
+    const unresolvedId = buildUnresolvedNodeId(edge.sourceDeviceId, sourceStableInterfaceKey, remoteFingerprint);
+    if (!nodeMap.has(unresolvedId)) {
+      nodeMap.set(unresolvedId, {
+        id: unresolvedId,
+        kind: "unresolved_remote",
+        deviceId: null,
+        hostname: edge.remoteSysName,
+        ipAddress: edge.remoteMgmtIp,
+        type: null,
+        site: null,
+        org: null,
+        pollHealth: null,
+        unresolvedFingerprint: {
+          remoteSysName: edge.remoteSysName,
+          remotePortId: edge.remotePortId,
+          remoteChassisId: edge.remoteChassisId,
+          remoteMgmtIp: edge.remoteMgmtIp,
+          fingerprint: remoteFingerprint,
+          sourceDeviceId: edge.sourceDeviceId,
+          sourceStableInterfaceKey,
+        },
+      });
+    }
+    return unresolvedId;
+  };
+
+  const addEdge = (edge: TopologyEdge) => {
+    const remoteFingerprint = buildRemoteFingerprint({
+      remoteSysName: edge.remoteSysName,
+      remotePortId: edge.remotePortId,
+      remoteChassisId: edge.remoteChassisId,
+      remoteMgmtIp: edge.remoteMgmtIp,
+    });
+    const edgeId = buildEdgeId(edge.sourceDeviceId, edge.stableInterfaceKey, remoteFingerprint);
+    if (edgeMap.has(edgeId)) return;
+    const resolvedTargetId =
+      Number.isInteger(edge.linkedDeviceId) && Number(edge.linkedDeviceId) > 0
+        ? `device:${Number(edge.linkedDeviceId)}`
+        : null;
+    const targetNodeId = resolvedTargetId ?? addUnresolvedNode(edge, edge.stableInterfaceKey, remoteFingerprint);
+    if (resolvedTargetId) {
+      ensureLocalDeviceNode(Number(edge.linkedDeviceId));
+    }
+    edgeMap.set(edgeId, {
+      ...edge,
+      id: edgeId,
+      sourceNodeId: `device:${edge.sourceDeviceId}`,
+      targetNodeId,
+    });
+  };
+
+  for (const device of scopedDevices) {
+    ensureLocalDeviceNode(device.id);
+    const correlation = buildUplinkCorrelationSnapshot(db, device.id);
+    if (!correlation) continue;
+
+    for (const row of correlation.correlatedInterfaces) {
+      if (!row.matchedNeighbor) continue;
+      addEdge({
+        id: "",
+        sourceNodeId: "",
+        targetNodeId: "",
+        sourceDeviceId: device.id,
+        stableInterfaceKey: row.stableInterfaceKey,
+        localIfIndex: row.localIfIndex,
+        localPortLabel: row.localPortLabel,
+        remoteSysName: row.matchedNeighbor.remoteSysName,
+        remotePortId: row.matchedNeighbor.remotePortId,
+        remoteChassisId: row.matchedNeighbor.remoteChassisId,
+        remoteMgmtIp: row.matchedNeighbor.remoteMgmtIp,
+        collectedAt: row.matchedNeighbor.collectedAt,
+        linkedDeviceId: row.matchedNeighbor.linkedDeviceId,
+        reviewStatus: row.matchedNeighbor.reviewStatus,
+        promotedDeviceId: row.matchedNeighbor.promotedDeviceId,
+        hasDocumentedFiber: row.hasDocumentedFiber,
+        matchedFiberConfig: row.matchedFiberConfig ?? null,
+        remoteNeighborRole: row.remoteNeighborRole,
+        remoteNeighborRoleConfidence: row.remoteNeighborRoleConfidence,
+        pathCriticalityScore: row.pathCriticalityScore,
+        pathCriticalityTier: row.pathCriticalityTier,
+        drivesTopLevel: row.drivesTopLevel,
+        likelyCauseCategory: row.likelyCauseCategory,
+        confidence: row.confidence,
+      });
+    }
+
+    const interfaces = listInterfaceSnapshotsForDevice(db, device.id) as Array<{
+      ifIndex: number | null;
+      ifName: string | null;
+      ifDescr: string | null;
+      ifAlias: string | null;
+    }>;
+    const interfaceByPort = new Map<string, { stableInterfaceKey: string; localIfIndex: number | null; localPortLabel: string }>();
+    for (const iface of interfaces) {
+      const label = String(iface.ifName ?? iface.ifDescr ?? iface.ifAlias ?? (iface.ifIndex != null ? `ifIndex-${iface.ifIndex}` : "unknown")).trim();
+      const stable = buildStableInterfaceKey(Number.isInteger(iface.ifIndex) ? Number(iface.ifIndex) : null, label);
+      const candidateValues = [label, iface.ifName, iface.ifDescr, iface.ifAlias];
+      for (const candidate of candidateValues) {
+        const key = normalizePortIdentity(candidate);
+        if (!key || interfaceByPort.has(key)) continue;
+        interfaceByPort.set(key, {
+          stableInterfaceKey: stable,
+          localIfIndex: Number.isInteger(iface.ifIndex) ? Number(iface.ifIndex) : null,
+          localPortLabel: label,
+        });
+      }
+    }
+
+    const neighbors = listNeighborsWithReview(db, { deviceId: device.id }) as NeighborWithReviewRow[];
+    for (const neighbor of neighbors) {
+      if (Number.isInteger(neighbor.linkedDeviceId) && Number(neighbor.linkedDeviceId) > 0) continue;
+      const localPortLabel = String(neighbor.localPort ?? "").trim();
+      if (!localPortLabel) continue;
+      const portKey = normalizePortIdentity(localPortLabel);
+      const matchedInterface = portKey ? interfaceByPort.get(portKey) ?? null : null;
+      const stableInterfaceKey = matchedInterface?.stableInterfaceKey ?? buildStableInterfaceKey(null, localPortLabel);
+      const localIfIndex = matchedInterface?.localIfIndex ?? null;
+      const resolvedPortLabel = matchedInterface?.localPortLabel ?? localPortLabel;
+      addEdge({
+        id: "",
+        sourceNodeId: "",
+        targetNodeId: "",
+        sourceDeviceId: device.id,
+        stableInterfaceKey,
+        localIfIndex,
+        localPortLabel: resolvedPortLabel,
+        remoteSysName: neighbor.remoteSysName ?? null,
+        remotePortId: neighbor.remotePortId ?? null,
+        remoteChassisId: neighbor.remoteChassisId ?? null,
+        remoteMgmtIp: neighbor.remoteMgmtIp ?? null,
+        collectedAt: neighbor.collectedAt ?? null,
+        linkedDeviceId: null,
+        reviewStatus: neighbor.reviewStatus ?? null,
+        promotedDeviceId: Number.isInteger(neighbor.promotedDeviceId) ? Number(neighbor.promotedDeviceId) : null,
+        hasDocumentedFiber: false,
+        matchedFiberConfig: null,
+        remoteNeighborRole: "unknown",
+        remoteNeighborRoleConfidence: "low",
+        pathCriticalityScore: 0,
+        pathCriticalityTier: "low",
+        drivesTopLevel: false,
+        likelyCauseCategory: "degraded_unknown",
+        confidence: "low",
+      });
+    }
+  }
+
+  const edges = Array.from(edgeMap.values()).sort((a, b) => a.id.localeCompare(b.id));
+  const nodes = Array.from(nodeMap.values()).sort((a, b) => a.id.localeCompare(b.id));
+  const drivingEdgeCount = edges.filter((edge) => edge.drivesTopLevel).length;
+  const unresolvedEdgeCount = edges.filter((edge) => edge.targetNodeId.startsWith("unresolved:")).length;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    scope: {
+      kind: scopeDeviceId ? "single_device" : "all_devices",
+      deviceId: scopeDeviceId ?? null,
+    },
+    counts: {
+      nodeCount: nodes.length,
+      edgeCount: edges.length,
+      drivingEdgeCount,
+      unresolvedEdgeCount,
+    },
+    nodes,
+    edges,
   };
 }

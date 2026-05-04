@@ -122,7 +122,7 @@ import { startCollectorCloudBridge } from "./collector-cloud-service.js";
 import { sendPing, activateAppliance } from "./xmon-client.js";
 import { loadApplianceIdentity, buildApplianceSummary } from "./appliance-state.js";
 import { startApplianceSync } from "./appliance-sync.js";
-import { buildUplinkCorrelationSnapshot } from "./uplink-correlation.js";
+import { buildTopologySnapshot, buildUplinkCorrelationSnapshot } from "./uplink-correlation.js";
 
 const config = loadConfig();
 let cloudBridgeStarted = false;
@@ -1289,6 +1289,32 @@ const server = createServer((req, res) => {
       }
       const snapshot = buildUplinkCorrelationSnapshot(db, deviceId);
       if (!snapshot) {
+        res.writeHead(404);
+        res.end(JSON.stringify({ ok: false, error: "device_not_found" }));
+        return;
+      }
+      res.writeHead(200);
+      res.end(JSON.stringify({ ok: true, snapshot }));
+    } catch {
+      res.writeHead(500);
+      res.end(JSON.stringify({ ok: false, error: "db_error" }));
+    }
+    return;
+  }
+
+  if (method === "GET" && url.startsWith("/api/tdt/topology-snapshot")) {
+    try {
+      if (!db) throw new Error("db missing");
+      const parsed = new URL(req.url ?? "/api/tdt/topology-snapshot", "http://localhost");
+      const deviceIdStr = parsed.searchParams.get("deviceId");
+      const deviceId = deviceIdStr ? Number(deviceIdStr) : undefined;
+      if (deviceIdStr && (!Number.isFinite(deviceId) || deviceId! <= 0 || !Number.isInteger(deviceId!))) {
+        res.writeHead(400);
+        res.end(JSON.stringify({ ok: false, error: "invalid_tdt_topology_snapshot_query" }));
+        return;
+      }
+      const snapshot = buildTopologySnapshot(db, deviceId ? { deviceId } : undefined);
+      if (!snapshot && deviceId) {
         res.writeHead(404);
         res.end(JSON.stringify({ ok: false, error: "device_not_found" }));
         return;
