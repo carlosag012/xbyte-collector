@@ -21,6 +21,8 @@ export type UplinkCorrelationCategory =
   | "degraded_unknown";
 
 export type UplinkCorrelationConfidence = "low" | "medium" | "high";
+export type RemoteNeighborRole = "network_infrastructure" | "server_or_host" | "unknown";
+export type PathCriticalityTier = "low" | "medium" | "high";
 
 type InterfaceSnapshotRow = {
   ifIndex: number | null;
@@ -111,6 +113,11 @@ export type CorrelatedInterfaceRow = {
   hasDocumentedFiber: boolean;
   matchedNeighbor: CorrelationNeighborSummary | null;
   matchedFiberConfig: CorrelationFiberSummary | null;
+  remoteNeighborRole: RemoteNeighborRole;
+  remoteNeighborRoleConfidence: UplinkCorrelationConfidence;
+  pathCriticalityScore: number;
+  pathCriticalityTier: PathCriticalityTier;
+  drivesTopLevel: boolean;
   likelyCauseCategory: UplinkCorrelationCategory;
   confidence: UplinkCorrelationConfidence;
   evidence: string[];
@@ -132,6 +139,7 @@ export type UplinkCorrelationSnapshot = {
   generatedAt: string;
   totalInterfaceCount: number;
   candidateUplinkCount: number;
+  drivingUplinkCount: number;
   likelyIssueCategory: UplinkCorrelationCategory;
   confidence: UplinkCorrelationConfidence;
   summary: string;
@@ -197,6 +205,153 @@ function hasAnyFiberValue(row: FiberConfigRow | null): boolean {
       row.rxLight ||
       row.txLight,
   );
+}
+
+function normalizeHintText(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function containsAnyToken(value: string, tokens: string[]): boolean {
+  if (!value) return false;
+  return tokens.some((token) => value.includes(token));
+}
+
+function classifyRemoteNeighborRole(input: {
+  linkedDeviceType: string | null | undefined;
+  linkedDeviceId: number | null;
+  reviewStatus: string | null | undefined;
+  remoteSysName: string | null | undefined;
+  remotePortId: string | null | undefined;
+}): { role: RemoteNeighborRole; confidence: UplinkCorrelationConfidence; evidence: string[] } {
+  const evidence: string[] = [];
+  const linkedType = normalizeHintText(input.linkedDeviceType);
+  const reviewStatus = normalizeHintText(input.reviewStatus);
+  const remoteSysName = normalizeHintText(input.remoteSysName);
+  const remotePortId = normalizeHintText(input.remotePortId);
+
+  const networkTypeHints = ["switch", "router", "firewall", "distribution", "core", "hub", "gateway", "access-point", "controller"];
+  const hostTypeHints = ["server", "workstation", "desktop", "laptop", "hypervisor", "virtual-machine", "vm", "host", "windows-server", "linux-server"];
+
+  if (containsAnyToken(linkedType, networkTypeHints)) {
+    evidence.push("remote_role_linked_device_type_network");
+    return { role: "network_infrastructure", confidence: "high", evidence };
+  }
+  if (containsAnyToken(linkedType, hostTypeHints)) {
+    evidence.push("remote_role_linked_device_type_host");
+    return { role: "server_or_host", confidence: "high", evidence };
+  }
+
+  const networkNameHint = /\b(core|distribution|dist|agg|aggregation|spine|leaf|switch|router|firewall|gateway|transit|wan|mdf|idf)\b/.test(
+    remoteSysName,
+  );
+  const hostNameHint = /\b(server|srv|host|hyperv|hyper-v|esxi|proxmox|kvm|vmware|workstation|desktop|laptop|node)\b/.test(remoteSysName);
+  const networkPortHint =
+    /^(gi|te|fo|fa|et|ge|xe)\b/.test(remotePortId) ||
+    /(gigabitethernet|fastethernet|tengig|twentyfivegig|fortygig|hundredgig|port-?channel|bundle-ether|ethernet\d*\/)/.test(remotePortId);
+  const hostPortHint = /^(eth\d+|eno\d+|ens\d+|enp\d+s?\d*|bond\d+|team\d+|veth\d*|docker\d*|tap\d*|vmnic\d+|lo\d*|wlan\d+|wlp\d*)$/.test(
+    remotePortId,
+  );
+
+  if (networkNameHint || networkPortHint) {
+    evidence.push("remote_role_name_or_port_network_hint");
+    if (input.linkedDeviceId && (reviewStatus === "linked" || reviewStatus === "promoted")) {
+      evidence.push("remote_role_linked_review_hint");
+      return { role: "network_infrastructure", confidence: "high", evidence };
+    }
+    return { role: "network_infrastructure", confidence: "medium", evidence };
+  }
+  if (hostNameHint || hostPortHint) {
+    evidence.push("remote_role_name_or_port_host_hint");
+    if (input.linkedDeviceId && (reviewStatus === "linked" || reviewStatus === "promoted")) {
+      evidence.push("remote_role_linked_review_hint");
+      return { role: "server_or_host", confidence: "high", evidence };
+    }
+    return { role: "server_or_host", confidence: "medium", evidence };
+  }
+
+  if (input.linkedDeviceId && reviewStatus === "ignored") {
+    evidence.push("remote_role_review_ignored");
+    return { role: "unknown", confidence: "medium", evidence };
+  }
+
+  evidence.push("remote_role_insufficient_signal");
+  return { role: "unknown", confidence: "low", evidence };
+}
+
+function scorePathCriticality(input: {
+  localPortLabel: string;
+  adminStatus: StatusNormalized;
+  operStatus: StatusNormalized;
+  hasRelationshipEvidence: boolean;
+  hasDocumentedFiber: boolean;
+  linkedDeviceResolved: boolean;
+  remoteNeighborRole: RemoteNeighborRole;
+  remoteNeighborRoleConfidence: UplinkCorrelationConfidence;
+}): { score: number; tier: PathCriticalityTier; evidence: string[] } {
+  const evidence: string[] = [];
+  let score = 0;
+
+  if (input.hasDocumentedFiber) {
+    score += 40;
+    evidence.push("criticality_documented_fiber");
+  }
+  if (input.hasRelationshipEvidence) {
+    score += 35;
+    evidence.push("criticality_relationship_evidence");
+  }
+  if (input.remoteNeighborRole === "network_infrastructure") {
+    score += 25;
+    evidence.push("criticality_network_neighbor_role");
+  } else if (input.remoteNeighborRole === "server_or_host") {
+    score -= 20;
+    evidence.push("criticality_host_neighbor_role");
+  } else {
+    evidence.push("criticality_unknown_neighbor_role");
+  }
+  if (input.linkedDeviceResolved) {
+    score += 10;
+    evidence.push("criticality_linked_device_resolved");
+  }
+  if (input.remoteNeighborRoleConfidence === "high") score += 8;
+  else if (input.remoteNeighborRoleConfidence === "medium") score += 4;
+
+  if (input.adminStatus === "up" && input.operStatus === "down") {
+    score += 8;
+    evidence.push("criticality_admin_up_oper_down");
+  } else if (input.adminStatus === "down") {
+    score -= 8;
+    evidence.push("criticality_admin_down");
+  } else if (input.adminStatus === "up" && input.operStatus === "up") {
+    score += 2;
+    evidence.push("criticality_admin_up_oper_up");
+  }
+
+  if (hasExplicitUplinkIntentLabel(input.localPortLabel)) {
+    score += 5;
+    evidence.push("criticality_explicit_uplink_intent");
+  }
+
+  if (score < 0) score = 0;
+  if (score > 100) score = 100;
+
+  const tier: PathCriticalityTier = score >= 70 ? "high" : score >= 45 ? "medium" : "low";
+  return { score, tier, evidence };
+}
+
+function shouldDriveTopLevel(input: {
+  hasRelationshipEvidence: boolean;
+  hasDocumentedFiber: boolean;
+  remoteNeighborRole: RemoteNeighborRole;
+  pathCriticalityScore: number;
+  pathCriticalityTier: PathCriticalityTier;
+}): boolean {
+  const hasCoreEvidence = input.hasRelationshipEvidence || input.hasDocumentedFiber;
+  if (!hasCoreEvidence) return false;
+  if (input.remoteNeighborRole === "server_or_host") return false;
+  if (input.remoteNeighborRole === "network_infrastructure") {
+    return input.pathCriticalityTier !== "low";
+  }
+  return input.pathCriticalityScore >= 80 && input.hasRelationshipEvidence && input.hasDocumentedFiber;
 }
 
 function classifyInterface(input: {
@@ -364,6 +519,8 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
     const matchedFiber =
       fiberByStableKey.get(stableInterfaceKey) ??
       (localPortKey ? fiberByPort.get(localPortKey) ?? null : null);
+    const hasRelationshipEvidence = Boolean(matchedNeighbor);
+    const hasDocumentedFiber = hasAnyFiberValue(matchedFiber ?? null);
 
     let linkedDevice: DeviceRow | null = null;
     let linkedHealth: DevicePollHealth | null = null;
@@ -399,9 +556,6 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
       (Boolean(linkedHealth?.lastFailureAt) &&
         (!linkedHealth?.lastSuccessAt || Date.parse(linkedHealth.lastFailureAt ?? "") > Date.parse(linkedHealth.lastSuccessAt ?? "")));
 
-    const hasRelationshipEvidence = Boolean(matchedNeighbor);
-    const hasDocumentedFiber = hasAnyFiberValue(matchedFiber ?? null);
-
     const classification = classifyInterface({
       adminStatus,
       operStatus,
@@ -409,6 +563,30 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
       hasDocumentedFiber,
       remoteLikelyDown: Boolean(remoteLikelyDown),
       lowTraffic,
+    });
+    const remoteRole = classifyRemoteNeighborRole({
+      linkedDeviceType: linkedDevice?.type ?? null,
+      linkedDeviceId,
+      reviewStatus: matchedNeighbor?.reviewStatus ?? null,
+      remoteSysName: matchedNeighbor?.remoteSysName ?? null,
+      remotePortId: matchedNeighbor?.remotePortId ?? null,
+    });
+    const criticality = scorePathCriticality({
+      localPortLabel,
+      adminStatus,
+      operStatus,
+      hasRelationshipEvidence,
+      hasDocumentedFiber,
+      linkedDeviceResolved: Boolean(linkedDeviceId),
+      remoteNeighborRole: remoteRole.role,
+      remoteNeighborRoleConfidence: remoteRole.confidence,
+    });
+    const drivesTopLevel = shouldDriveTopLevel({
+      hasRelationshipEvidence,
+      hasDocumentedFiber,
+      remoteNeighborRole: remoteRole.role,
+      pathCriticalityScore: criticality.score,
+      pathCriticalityTier: criticality.tier,
     });
 
     const matchedNeighborSummary: CorrelationNeighborSummary | null = matchedNeighbor
@@ -459,17 +637,23 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
       hasDocumentedFiber,
       matchedNeighbor: matchedNeighborSummary,
       matchedFiberConfig: matchedFiberSummary,
+      remoteNeighborRole: remoteRole.role,
+      remoteNeighborRoleConfidence: remoteRole.confidence,
+      pathCriticalityScore: criticality.score,
+      pathCriticalityTier: criticality.tier,
+      drivesTopLevel,
       likelyCauseCategory: classification.category,
       confidence: classification.confidence,
-      evidence: classification.evidence,
+      evidence: [...classification.evidence, ...remoteRole.evidence, ...criticality.evidence],
     };
   });
 
   const candidateRows = correlatedRows.filter((row) => isCandidateUplinkInterface(row));
+  const drivingRows = candidateRows.filter((row) => row.drivesTopLevel);
 
   const blastRadiusCandidates: BlastRadiusCandidate[] = [];
   const seenBlast = new Set<string>();
-  for (const row of candidateRows) {
+  for (const row of drivingRows) {
     if (!row.matchedNeighbor) continue;
     if (row.likelyCauseCategory === "healthy" || row.likelyCauseCategory === "admin_shutdown") continue;
     const key = `${row.localPortLabel}|${row.matchedNeighbor.remoteMgmtIp ?? ""}|${row.matchedNeighbor.remoteSysName ?? ""}`;
@@ -485,24 +669,28 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
   }
 
   const topRow =
-    candidateRows
+    drivingRows
       .slice()
       .sort((a, b) => {
         const byPriority = categoryPriority(b.likelyCauseCategory) - categoryPriority(a.likelyCauseCategory);
         if (byPriority !== 0) return byPriority;
-        return confidenceScore(b.confidence) - confidenceScore(a.confidence);
+        const byConfidence = confidenceScore(b.confidence) - confidenceScore(a.confidence);
+        if (byConfidence !== 0) return byConfidence;
+        return b.pathCriticalityScore - a.pathCriticalityScore;
       })[0] ?? null;
 
   const likelyIssueCategory = topRow?.likelyCauseCategory ?? "degraded_unknown";
   const confidence = topRow?.confidence ?? "low";
-  const issueRows = candidateRows.filter((row) => row.likelyCauseCategory !== "healthy");
+  const issueRows = drivingRows.filter((row) => row.likelyCauseCategory !== "healthy");
   const affectedUplinkCount = issueRows.length;
 
-  const summary = candidateRows.length
+  const summary = drivingRows.length
     ? likelyIssueCategory === "healthy"
-      ? "No likely uplink or fiber-path issues detected from current candidate uplink evidence."
-      : `Likely ${categorySummary(likelyIssueCategory)} on ${issueRows.length} candidate uplink interface(s); ${blastRadiusCandidates.length} one-hop blast radius candidate(s).`
-    : "No candidate uplink interfaces matched documented fiber, relationship evidence, or physical uplink patterns.";
+      ? "No likely uplink or fiber-path issues detected from high-confidence network-uplink evidence."
+      : `Likely ${categorySummary(likelyIssueCategory)} on ${issueRows.length} high-confidence uplink interface(s); ${blastRadiusCandidates.length} one-hop blast radius candidate(s).`
+    : candidateRows.length
+      ? "Candidate uplink evidence is present, but no high-confidence network-uplink path currently qualifies to drive top-level conclusions."
+      : "No candidate uplink interfaces matched documented fiber, relationship evidence, or explicit uplink intent labels.";
 
   return {
     deviceId: device.id,
@@ -512,6 +700,7 @@ export function buildUplinkCorrelationSnapshot(db: DB, deviceId: number): Uplink
     generatedAt: new Date().toISOString(),
     totalInterfaceCount: correlatedRows.length,
     candidateUplinkCount: candidateRows.length,
+    drivingUplinkCount: drivingRows.length,
     likelyIssueCategory,
     confidence,
     summary,
